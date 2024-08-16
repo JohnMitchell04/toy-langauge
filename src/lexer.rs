@@ -17,6 +17,15 @@ pub enum Token {
     EOF,
 }
 
+impl Token {
+    pub fn take_name(&mut self) -> String {
+        match std::mem::replace(self, Self::EOF) {
+            Self::Ident(name) => name,
+            _ => panic!("Cannot take variable name"),
+        }
+    }
+}
+
 impl Display for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -43,7 +52,7 @@ impl Display for Token {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LexError {
     pub message: &'static str,
     pub section: String,
@@ -266,97 +275,97 @@ mod tests {
     }
 
     #[test]
-    fn test_comment() {
+    fn comment() {
         let output = create_lexer("// this is a comment");
         assert_eq!(vec![Token::Comment, Token::EOF], output)
     }
 
     #[test]
-    fn test_integer() {
+    fn integer() {
         let output = create_lexer("5");
         assert_eq!(vec![Token::Number(5f64), Token::EOF], output)
     }
 
     #[test]
-    fn test_large_integer() {
+    fn large_integer() {
         let output = create_lexer("50000000000000000000000");
         assert_eq!(vec![Token::Number(50000000000000000000000f64), Token::EOF], output)
     }
 
     #[test]
-    fn test_float() {
+    fn float() {
         let output = create_lexer("5.1");
         assert_eq!(vec![Token::Number(5.1f64), Token::EOF], output)
     }
 
     #[test]
-    fn test_long_float() {
+    fn long_float() {
         let output = create_lexer("5.00000000000000000000001");
         assert_eq!(vec![Token::Number(5.00000000000000000000001f64), Token::EOF], output)
     }
 
     #[test]
-    fn test_invalid_float() {
+    fn invalid_float() {
         let output = create_lexer_res("5.1.5");
         assert_eq!(Err(LexError::new("Invalid number format", "5.1.5".to_string(), 1, 1)), output)
     }
 
     #[test]
-    fn test_invalid_num_character() {
+    fn invalid_num_character() {
         let output = create_lexer_res(".");
         assert_eq!(Err(LexError::new("Unexpected character", ".".to_string(), 1, 1)), output)
     }
 
     #[test]
-    fn test_invalid_character() {
+    fn invalid_character() {
         let output = create_lexer_res("~");
         assert_eq!(Err(LexError::new("Unexpected character", "~".to_string(), 1, 1)), output)
     }
 
     #[test]
-    fn test_keyword() {
+    fn keyword() {
         let output = create_lexer("extern");
         assert_eq!(vec![Token::Extern, Token::EOF], output)
     }
 
     #[test]
-    fn test_ident() {
+    fn ident() {
         let output = create_lexer("input");
         assert_eq!(vec![Token::Ident("input".to_string()), Token::EOF], output)
     }
 
     #[test]
-    fn test_invalid_ident() {
+    fn invalid_ident() {
         let output = create_lexer_res("tes!t");
         assert_eq!(Err(LexError::new("Invalid identifier", "tes!t".to_string(), 1, 1)), output)
     }
 
     #[test]
-    fn test_invalid_number() {
+    fn invalid_number() {
         let output = create_lexer_res("5test");
         assert_eq!(Err(LexError::new("Invalid identifier", "5test".to_string(), 1, 1)), output)
     }
 
     #[test]
-    fn test_numeric_simple() {
+    fn numeric_simple() {
         let output = create_lexer("5 + 5");
         assert_eq!(vec![Token::Number(5f64), Token::Op('+'), Token::Number(5f64), Token::EOF], output)
     }
 
     #[test]
-    fn test_numeric_complex() {
+    fn numeric_complex() {
         let output = create_lexer("(5+5) * 5");
         assert_eq!(vec![Token::LParen, Token::Number(5f64), Token::Op('+'), Token::Number(5f64), Token::RParen, Token::Op('*'), Token::Number(5f64), Token::EOF], output)
     }
 
     #[test]
-    fn test_assign_expr() {
+    fn assign_expr() {
         let output = create_lexer("var test = 5;");
         assert_eq!(vec![Token::Var, Token::Ident("test".to_string()), Token::Op('='), Token::Number(5f64), Token::Semicolon, Token::EOF], output)
     }
 
     #[test]
-    fn test_for_loop() {
+    fn for_loop() {
         let output = create_lexer("for (x = 5; x < 10; x = x + 1) { var test = 5; }");
         assert_eq!(
             vec![
@@ -370,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn test_func() {
+    fn func() {
         let output = create_lexer("fun test(x, y, z) {}");
         assert_eq!(
             vec![

@@ -16,29 +16,45 @@ macro_rules! match_error {
     };
 }
 
+macro_rules! match_no_error {
+    ($self:ident, $token:pat, $str:tt) => {
+        match $self.peek() {
+            Ok($token) => { _ = $self.next() },
+            Ok(_) => {
+                trace!("Error: {}", $str);
+                $self.errors.push($str)
+            },
+            Err(err) => {
+                trace!("Error: {}", err);
+                let message = err.message;
+                $self.errors.push(message)
+            },
+        }
+    };
+}
+
 macro_rules! err_advance_safe {
-    ($self:ident, $message:tt, $($token:pat),*) => {
-        $self.panic_mode = true;
-
-        // Advance to next safe point
-        loop {
-            let token = $self.peek();
-            if token.is_err() {
-                _ = $self.next();
-            } else if matches!(token.as_ref().unwrap(), $($token)|*) {
-                _ = $self.next();
-                break
-            } else {
-                _ = $self.next()
+    ($self:ident, $message:expr, $($token:pat),*) => {
+        {
+            // Advance to next safe point
+            loop {
+                let token = $self.peek();
+                if token.is_err() {
+                    _ = $self.next();
+                } else if matches!(token.as_ref().unwrap(), Token::EOF | $($token)|*) {
+                    break
+                } else {
+                    _ = $self.next()
+                }
             }
-        }
 
-        if cfg!(debug_assertions) {
-            println!("TRACE: ERROR: {}", $message);
-        }
+            if cfg!(debug_assertions) {
+                println!("TRACE: ERROR: {}", $message);
+            }
 
-        // Add error to list of errors
-        $self.errors.push($message);
+            // Add error to list of errors
+            $self.errors.push($message);
+        }
     };
 }
 
@@ -126,7 +142,6 @@ impl Display for Function {
 
 pub struct Parser<'a> {
     lexer: Peekable<Lexer<'a>>,
-    pos: usize,
     errors: Vec<&'static str>,
     panic_mode: bool
 }
@@ -139,7 +154,7 @@ impl<'a> Parser<'a> {
     pub fn new(input: &'a str) -> Self {
         let lexer = Lexer::new(input).into_iter().peekable();
 
-        Parser { lexer, pos: 0, errors: Vec::new(), panic_mode: false }
+        Parser { lexer, errors: Vec::new(), panic_mode: false }
     }
 
     /// Parse the given input, will return an anonymous [`Function`] containing the parsed source or an error message.
@@ -150,6 +165,7 @@ impl<'a> Parser<'a> {
         // TODO: Right now we will only accept a single top level function definition, eventually this will be expanded to allow more functions, globals and links to other files
         let body = self.parse_fun_def().map_err(|_| ())?;
 
+        // TODO: This is only temporary for whilst we only allow one function def
         if let Ok(token) = self.peek() {
             if *token != Token::EOF { self.errors.push("Unexpected token after parsed expression") }
         }
@@ -190,16 +206,16 @@ impl<'a> Parser<'a> {
         Expr::Null
     }
 
-    /// Add an error to the parser but do not try and move to a safe location.
-    fn err(&mut self, message: &'static str) {
-        self.panic_mode = true;
+    // /// Add an error to the parser but do not try and move to a safe location.
+    // fn err(&mut self, message: &'static str) {
+    //     self.panic_mode = true;
 
-        if cfg!(debug_assertions) {
-            println!("TRACE: ERROR: {}", message);
-        }
+    //     if cfg!(debug_assertions) {
+    //         println!("TRACE: ERROR: {}", message);
+    //     }
 
-        self.errors.push(message)
-    }
+    //     self.errors.push(message)
+    // }
 
     fn peek(&mut self) -> &LexResult {
         self.lexer.peek().unwrap()
@@ -209,60 +225,55 @@ impl<'a> Parser<'a> {
         self.lexer.next().unwrap()
     }
 
-    // TODO: Extend to operator function declarations
+    // TODO: Extend to operator function declarations and add return types
     /// Parse a function prototype.
     /// 
     /// **Prototype** ::= <[Ident](Token::Ident)> '(' <[Ident](Token::Ident)>,* ')'
-    fn parse_prototype(&mut self) -> Result<Prototype, &'static str> {
+    fn parse_prototype(&mut self) -> Prototype {
         trace!("Parsing prototype");
-        // TODO: Improve error handling in this function to move to the next safe position
-        let name = match self.next() {
-            Ok(Token::Ident(id)) => id,
-            Ok(_) => { return Err("Expected identifier") },
-            Err(err) => return Err(err.message),
+        let name = match self.peek() {
+            Ok(Token::Ident(_)) => self.next().unwrap().take_name(),
+            Ok(_) => { self.errors.push("Expected function identifier"); "".to_string() },
+            Err(ref err) => { let message = err.message; self.errors.push(message); "".to_string() },
         };
 
-        match self.next() {
-            Ok(Token::LParen) => {},
-            Ok(_) => return Err("Expected '(' before argument list"),
-            Err(err) => return Err(err.message),
-        }
+        match_no_error!(self, Token::LParen, "Expected '(' before argument list");
 
         let mut args = Vec::new();
         while let Ok(token) = self.peek() {
             if *token == Token::RParen { break }
 
-            match self.next() {
-                Ok(Token::Ident(name)) => args.push(name),
-                Ok(_) => return Err("Expected identifier"),
-                Err(err) => return Err(err.message),
+            match self.peek() {
+                Ok(Token::Ident(_)) => { args.push(self.next().unwrap().take_name()) },
+                Ok(_) => err_advance_safe!(self, "Expected argument identifier", Token::Comma, Token::RParen, Token::LBrace),
+                Err(err) => {let message = err.message; err_advance_safe!(self, message, Token::Comma, Token::RParen, Token::LBrace) },
             }
 
             match self.peek() {
                 Ok(Token::Comma) => { _ = self.next(); },
                 Ok(Token::RParen) => break,
-                Ok(_) => return Err("Expected comma"),
-                Err(err) => return Err(err.message),
+                Ok(Token::LBrace) => break,
+                Ok(Token::EOF) => break,
+                Ok(_) => self.errors.push("Expected comma after identifier"),
+                Err(err) => { let message = err.message; self.errors.push(message) },
             }
         }
 
-        match self.next() {
-            Ok(Token::RParen) => {},
-            Ok(_) => return Err("Expected ')' after argument list"),
-            Err(err) => return Err(err.message),
-        }
+        match_no_error!(self, Token::RParen, "Expected ')' after argument list");
 
-        Ok(Prototype { name, args, is_op: false, prec: 0 })
+        Prototype { name, args, is_op: false, prec: 0 }
     }
 
     // TODO: This is not used right now, implement when globals are added
     /// Parse an external.
     /// 
-    /// **Extern** ::= <[Prototype](Self::parse_prototype)>
+    /// **Extern** ::= 'extern' <[Prototype](Self::parse_prototype)>
     fn parse_extern(&mut self) -> Result<Function, &'static str> {
         trace!("Parsing external");
-        self.pos += 1;
-        let prototype = self.parse_prototype()?;
+
+        // TODO: Parse extern keyword
+
+        let prototype = self.parse_prototype();
         Ok(Function { prototype, body: vec![], is_anon: false})
     }
 
@@ -271,32 +282,13 @@ impl<'a> Parser<'a> {
     /// **FunctionDefinition** ::= 'fun' <[Prototype](Self::parse_prototype)> <[Body](Self::parse_body)>
     fn parse_fun_def(&mut self) -> Result<Function, &'static str> {
         trace!("Parsing function definition");
-        self.pos += 1;
 
-        match self.peek() {
-            Ok(Token::Fun) => { _ = self.next() },
-            Ok(_) => return Err("Expected 'fun' before function declaration"),
-            Err(err) => return Err(err.message),
-        }
+        match_no_error!(self, Token::Fun, "Expected 'fun' keyword before function declaration");
 
-        let result = self.parse_prototype();
-
-        if result.is_err() { self.err_recover("Could not parse prototype"); }
+        let prototype = self.parse_prototype();
         let body = self.parse_body();
 
-        let prototype = match result {
-            Ok(prototype) => prototype,
-            Err(_) => {
-                Prototype {
-                    name: "".to_string(),
-                    args: vec![],
-                    is_op: false,
-                    prec: 0
-                }
-            },
-        };
-
-        Ok(Function { prototype: prototype, body, is_anon: false })
+        Ok(Function { prototype, body, is_anon: false })
     }
 
     /// Parse a function or statement body.
@@ -304,11 +296,8 @@ impl<'a> Parser<'a> {
     /// **Body** ::= '{' <[Statement](Self::parse_stmt)>* '}'
     fn parse_body(&mut self) -> Vec<Expr> {
         trace!("Parsing body");
-        match self.next() {
-            Ok(Token::LBrace) => { },
-            Ok(_) => return vec![self.err_recover("Expected '{' before function body")],
-            Err(err) => return vec![self.err_recover(err.message)],
-        }
+    
+        match_no_error!(self, Token::LBrace, "Expected '{' before body");
 
         let mut stmts = Vec::new();
         while let Ok(node) = self.peek() {
@@ -316,11 +305,7 @@ impl<'a> Parser<'a> {
             stmts.push(self.parse_stmt());
         }
 
-        match self.next() {
-            Ok(Token::RBrace) => { },
-            Ok(_) => return vec![self.err_recover("Expected '}' after function body")],
-            Err(err) => return vec![self.err_recover(err.message)],
-        }
+        match_no_error!(self, Token::RBrace, "Expected '}' after body");
 
         stmts
     }
@@ -584,9 +569,15 @@ mod tests {
         parser.parse().unwrap()
     }
 
+    fn parse_error(input: &str) -> Vec<&'static str> {
+        let mut parser = Parser::new(input);
+        _ = parser.parse();
+        parser.get_errors().iter().map(|&s| s).collect()
+    }
+
     // TODO: Right now all tests have a single top level function in line with the current grammar, when the grammar is expanded add new tests
     #[test]
-    fn test_empty_func() {
+    fn empty_func() {
         let res = parse_no_error("fun test() {}");
         assert_eq!(
             Function { 
@@ -604,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn test_func_arg() {
+    fn func_arg() {
         let res = parse_no_error("fun test(x, y, z) {}");
         assert_eq!(
             Function {
@@ -622,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn test_func_body() {
+    fn func_body() {
         let res = parse_no_error("fun test() { 4 + 5; }");
         assert_eq!(
             Function {
@@ -640,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn test_func_multiple_body() {
+    fn func_multiple_body() {
         let res = parse_no_error("fun test() { 4 + 5; 5 - 6; }");
         assert_eq!(
             Function {
@@ -661,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn test_complex_arithmetic() {
+    fn complex_arithmetic() {
         let res = parse_no_error("fun test() { 4 + 5 * 5 - 6 / ((5 + 6) * 6); }");
         assert_eq!(
             Function {
@@ -697,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn test_call() {
+    fn call() {
         let res = parse_no_error("fun test() { function(); }");
         assert_eq!(
             Function {
@@ -715,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn test_call_args() {
+    fn call_args() {
         let res = parse_no_error("fun test() { function(x, y, z); }");
         assert_eq!(
             Function {
@@ -733,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn test_var_assignment() {
+    fn var_assignment() {
         let res = parse_no_error("fun test() { var x = 4 + 5; }");
         assert_eq!(
             Function {
@@ -750,5 +741,71 @@ mod tests {
             },
             res
         )
+    }
+
+    #[test]
+    fn func_no_end() {
+        let output = parse_error("fun test( { 5 + 6; }");
+        assert_eq!(vec!["Expected argument identifier", "Expected ')' after argument list"], output)
+    }
+
+    #[test]
+    fn func_args_no_end() {
+        let output = parse_error("fun test(x, y, z { 5 + 6; }");
+        assert_eq!(vec!["Expected ')' after argument list"], output)
+    }
+
+    #[test]
+    fn func_args_no_comma() {
+        let output = parse_error("fun test(x y z) { 5 + 6; }");
+        assert_eq!(vec!["Expected comma after identifier", "Expected comma after identifier"], output)
+    }
+
+    #[test]
+    fn func_args_accidental_comma() {
+        let output = parse_error("fun test(, x, y, z) { 5 + 6; }");
+        assert_eq!(vec!["Expected argument identifier"], output)
+    }
+
+    #[test]
+    fn func_no_body() {
+        let output = parse_error("fun test() ");
+        assert_eq!(vec!["Expected '{' before body", "Expected '}' after body"], output)
+    }
+
+    #[test]
+    fn func_no_body_but_stmt() {
+        let output = parse_error("fun test() 5 + 6; ");
+        assert_eq!(vec!["Expected '{' before body", "Expected '}' after body"], output)
+    }
+
+    #[test]
+    fn func_no_end_body() {
+        let output = parse_error("fun test() { 5 + 6; ");
+        assert_eq!(vec!["Expected '}' after body"], output)
+    }
+
+    #[test]
+    fn func_no_start_body_no_arg_end() {
+        let output = parse_error("fun test(  5 + 6; ");
+        assert_eq!(vec!["Expected argument identifier", "Expected ')' after argument list", "Expected '{' before body", "Expected '}' after body"], output)
+    }
+
+    #[test]
+    fn func_incorrect_arg_type() {
+        let output = parse_error("fun test(5 + 6;) {}");
+        assert_eq!(vec!["Expected argument identifier"], output)
+    }
+
+    #[test]
+    fn func_no_keyword() {
+        let output = parse_error("test() { }");
+        assert_eq!(vec!["Expected 'fun' keyword before function declaration"], output)
+    }
+
+    #[test]
+    fn func_no_identifier() {
+        let output = parse_error("fun () { }");
+        assert_eq!(vec!["Expected function identifier"], output)
     }
 }
