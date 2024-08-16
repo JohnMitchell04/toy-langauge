@@ -1,0 +1,12 @@
+[package]
+name = "toy-langauge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+inkwell = { version = "0.5.0", features = ["llvm18-0-prefer-static"] }
+itertools = "0.13.0"
+
+[[bin]]
+name = "compiler"
+path = "src/main.rs"
