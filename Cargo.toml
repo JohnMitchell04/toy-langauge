@@ -2,8 +2,10 @@
 name = "toy-langauge"
 version = "0.1.0"
 edition = "2021"
+description = "A compiler for a C-like toy language"
 
 [dependencies]
+clap = { version = "4.5.16", features = ["derive"] }
 inkwell = { version = "0.5.0", features = ["llvm18-0-prefer-static"] }
 itertools = "0.13.0"
 

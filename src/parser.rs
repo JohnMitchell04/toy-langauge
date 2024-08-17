@@ -3,14 +3,28 @@ use itertools::Itertools;
 
 use crate::{lexer::{LexResult, Lexer, Token}, trace};
 
-macro_rules! match_error {
+// TODO: This macro is likely temporary whilst error handling is decided
+macro_rules! match_error_stmt {
     ($self:ident, $token:pat, $str:tt) => {
         match $self.peek() {
             Ok($token) => { _ = $self.next() },
-            Ok(_) => return $self.err_recover($str),
+            Ok(_) => return $self.err_recover_stmt($str),
             Err(err) => {
                 let message = err.message;
-                return $self.err_recover(message)
+                return $self.err_recover_stmt(message)
+            },
+        }
+    };
+}
+
+macro_rules! match_error_expr {
+    ($self:ident, $token:pat, $str:tt) => {
+        match $self.peek() {
+            Ok($token) => { _ = $self.next() },
+            Ok(_) => return $self.err_recover_expr($str),
+            Err(err) => {
+                let message = err.message;
+                return $self.err_recover_expr(message)
             },
         }
     };
@@ -58,8 +72,9 @@ macro_rules! err_advance_safe {
     };
 }
 
+// TODO: Split VarAssign into VarDeclare and VarAssign, and ensure our expressions actually allow assignment
+
 #[derive(Debug, PartialEq)]
-// TODO: Maybe split into expr and stmt types
 pub enum Expr {
     Binary {
         op: char,
@@ -74,18 +89,6 @@ pub enum Expr {
         fn_name: String,
         args: Vec<Expr>,
     },
-    Conditional {
-        cond: Box<Expr>,
-        then: Vec<Expr>,
-        otherwise: Vec<Expr>,
-    },
-    For {
-        var_name: String,
-        start: Box<Expr>,
-        condition: Box<Expr>,
-        step: Box<Expr>,
-        body: Vec<Expr>,
-    },
     Number(f64),
     Variable(String),
     VarAssign {
@@ -95,15 +98,13 @@ pub enum Expr {
     Null,
 }
 
-// TODO: Improve display
+// TODO Improve display
 impl Display for Expr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Binary { op, left, right } => write!(f, "Binary: {} {} {}", left.as_ref(), op, right.as_ref()),
             Self::Unary { op, right } => write!(f, "Unary: {} {}", op, right.as_ref()),
             Self::Call { fn_name, args } => write!(f, "Call: <fn({}) {}>", args.iter().join(","), fn_name),
-            Self::Conditional { cond, then, otherwise } => write!(f, "If: {} then: {}\nelse: {}", cond.as_ref(), then.iter().join(",\n"), otherwise.iter().join(",\n")),
-            Self::For { var_name, start, condition, step, body } => write!(f, "For: {} = {}; {}; {}:\n{}", var_name, start.as_ref(), condition.as_ref(), step.as_ref(), body.iter().join(",\n")),
             Self::Number(num) => write!(f, "Number: {}", num),
             Self::Variable(ident) => write!(f, "Variable: {}", ident),
             Self::VarAssign { variable, body } => write!(f, "Assignment: {} = {}", variable, body),
@@ -113,30 +114,48 @@ impl Display for Expr {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Prototype {
-    pub name: String,
-    pub args: Vec<String>,
-    pub is_op: bool,
-    pub prec: usize,
-}
-
-impl Display for Prototype {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<fn({}) {}>", self.args.iter().join(","), self.name)
+pub enum Stmt {
+    Conditional {
+        cond: Expr,
+        then: Vec<Stmt>,
+        otherwise: Vec<Stmt>,
+    },
+    For {
+        var_name: String,
+        start: Expr,
+        condition: Expr,
+        step: Expr,
+        body: Vec<Stmt>,
+    },
+    Prototype {
+        name: String,
+        args: Vec<String>,
+        is_op: bool,
+        prec: usize,
+    },
+    Function {
+        prototype: Box<Stmt>,
+        body: Vec<Stmt>,
+        is_anon: bool,
+    },
+    Expression {
+        expr: Expr
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub struct Function {
-    pub prototype: Prototype,
-    pub body: Vec<Expr>,
-    pub is_anon: bool,
-}
-
-impl Display for Function {
+// TODO Improve display
+impl Display for Stmt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let body = if !self.body.is_empty() { self.body.iter().join(",\n") } else { "none".to_string() };
-        write!(f, "{}:\n{}", self.prototype, body)
+        match self {
+            Self::Conditional { cond, then, otherwise } => write!(f, "If: {} then: {}\nelse: {}", cond, then.iter().join(",\n"), otherwise.iter().join(",\n")),
+            Self::For { var_name, start, condition, step, body } => write!(f, "For: {} = {}; {}; {}:\n{}", var_name, start, condition, step, body.iter().join(",\n")),
+            Self::Prototype { name, args, is_op: _, prec: _ } => write!(f, "<fn({}) {}>", args.iter().join(","), name),
+            Self::Function { prototype, body, is_anon: _ } => {
+                let body = if !body.is_empty() { body.iter().join(",\n") } else { "none".to_string() };
+                write!(f, "{}:\n{}", prototype, body)
+            },
+            Self::Expression { expr } => write!(f, "{}", expr),
+        }
     }
 }
 
@@ -160,17 +179,17 @@ impl<'a> Parser<'a> {
     /// Parse the given input, will return an anonymous [`Function`] containing the parsed source or an error message.
     /// 
     /// **Start** ::= <[FunctionDefinition](Self::parse_fun_def)>
-    pub fn parse(&mut self) -> Result<Function, ()> {
+    pub fn parse(&mut self) -> Result<Vec<Stmt>, Vec<&'static str>> {
         trace!("Starting parse");
         // TODO: Right now we will only accept a single top level function definition, eventually this will be expanded to allow more functions, globals and links to other files
-        let body = self.parse_fun_def().map_err(|_| ())?;
+        let body = self.parse_fun_def();
 
         // TODO: This is only temporary for whilst we only allow one function def
         if let Ok(token) = self.peek() {
             if *token != Token::EOF { self.errors.push("Unexpected token after parsed expression") }
         }
 
-        if !self.errors.is_empty() { Err(()) } else { Ok(body) }
+        if !self.errors.is_empty() { Err(self.errors.clone()) } else { Ok(vec![body]) }
     }
 
     /// Get the errors accrued whilst parsing.
@@ -181,7 +200,7 @@ impl<'a> Parser<'a> {
     // TODO: Improve with locational information.
     // TODO: Complex functions that use this can continue to try and parse themselves instead of returning to their parent.
     /// Add an error to the parser and advance to the next safe location, this ensures we try and collect the maximal number of errors possible.
-    fn err_recover(&mut self, message: &'static str) -> Expr {
+    fn err_recover_stmt(&mut self, message: &'static str) -> Stmt {
         self.panic_mode = true;
 
         // Advance to next safe point
@@ -203,19 +222,33 @@ impl<'a> Parser<'a> {
 
         // Add error to list of errors
         self.errors.push(message);
-        Expr::Null
+        Stmt::Expression { expr: Expr::Null }
     }
 
-    // /// Add an error to the parser but do not try and move to a safe location.
-    // fn err(&mut self, message: &'static str) {
-    //     self.panic_mode = true;
+    fn err_recover_expr(&mut self, message: &'static str) -> Expr {
+        self.panic_mode = true;
 
-    //     if cfg!(debug_assertions) {
-    //         println!("TRACE: ERROR: {}", message);
-    //     }
+        // Advance to next safe point
+        loop {
+            let token = self.peek();
+            if token.is_err() {
+                _ = self.next();
+            } else if matches!(token.as_ref().unwrap(), Token::Semicolon | Token::LParen | Token::RParen | Token::LBrace | Token::RBrace | Token::EOF) {
+                _ = self.next();
+                break
+            } else {
+                _ = self.next()
+            }
+        }
 
-    //     self.errors.push(message)
-    // }
+        if cfg!(debug_assertions) {
+            println!("TRACE: ERROR: {}", message);
+        }
+
+        // Add error to list of errors
+        self.errors.push(message);
+        Expr::Null 
+    }
 
     fn peek(&mut self) -> &LexResult {
         self.lexer.peek().unwrap()
@@ -229,7 +262,7 @@ impl<'a> Parser<'a> {
     /// Parse a function prototype.
     /// 
     /// **Prototype** ::= <[Ident](Token::Ident)> '(' <[Ident](Token::Ident)>,* ')'
-    fn parse_prototype(&mut self) -> Prototype {
+    fn parse_prototype(&mut self) -> Stmt {
         trace!("Parsing prototype");
         let name = match self.peek() {
             Ok(Token::Ident(_)) => self.next().unwrap().take_name(),
@@ -261,40 +294,40 @@ impl<'a> Parser<'a> {
 
         match_no_error!(self, Token::RParen, "Expected ')' after argument list");
 
-        Prototype { name, args, is_op: false, prec: 0 }
+        Stmt::Prototype { name, args, is_op: false, prec: 0 }
     }
 
     // TODO: This is not used right now, implement when globals are added
     /// Parse an external.
     /// 
     /// **Extern** ::= 'extern' <[Prototype](Self::parse_prototype)>
-    fn parse_extern(&mut self) -> Result<Function, &'static str> {
+    fn parse_extern(&mut self) -> Stmt {
         trace!("Parsing external");
 
         // TODO: Parse extern keyword
 
-        let prototype = self.parse_prototype();
-        Ok(Function { prototype, body: vec![], is_anon: false})
+        let prototype = Box::new(self.parse_prototype());
+        Stmt::Function { prototype, body: vec![], is_anon: false}
     }
 
     /// Parse a function definition and return a function object.
     /// 
     /// **FunctionDefinition** ::= 'fun' <[Prototype](Self::parse_prototype)> <[Body](Self::parse_body)>
-    fn parse_fun_def(&mut self) -> Result<Function, &'static str> {
+    fn parse_fun_def(&mut self) -> Stmt {
         trace!("Parsing function definition");
 
         match_no_error!(self, Token::Fun, "Expected 'fun' keyword before function declaration");
 
-        let prototype = self.parse_prototype();
+        let prototype = Box::new(self.parse_prototype());
         let body = self.parse_body();
 
-        Ok(Function { prototype, body, is_anon: false })
+        Stmt::Function { prototype, body, is_anon: false }
     }
 
     /// Parse a function or statement body.
     /// 
     /// **Body** ::= '{' <[Statement](Self::parse_stmt)>* '}'
-    fn parse_body(&mut self) -> Vec<Expr> {
+    fn parse_body(&mut self) -> Vec<Stmt> {
         trace!("Parsing body");
     
         match_no_error!(self, Token::LBrace, "Expected '{' before body");
@@ -310,7 +343,6 @@ impl<'a> Parser<'a> {
         stmts
     }
 
-    // TODO: The identifier assignment statement and call expression need to be seperated
     /// Parse a statement.
     /// 
     /// **Statement** ::=
@@ -318,7 +350,7 @@ impl<'a> Parser<'a> {
     /// | <[Conditional](Self::parse_conditional_stmt)>
     /// | <[For](Self::parse_for_stmt)>
     /// | <[Var](Self::parse_var_stmt)>
-    fn parse_stmt(&mut self) -> Expr {
+    fn parse_stmt(&mut self) -> Stmt {
         trace!("Parsing statement");
         match self.peek() {
             Ok(Token::If) => self.parse_conditional_stmt(),
@@ -327,7 +359,7 @@ impl<'a> Parser<'a> {
             Ok(_) => self.parse_expr_stmt(),
             Err(err) => {
                 let message = err.message;
-                self.err_recover(message)
+                self.err_recover_stmt(message)
             },
         }
     }
@@ -335,26 +367,26 @@ impl<'a> Parser<'a> {
     /// Parse an expression statement.
     /// 
     /// **ExpressionStatement** ::= [Expression](Self::parse_expr) ';'
-    fn parse_expr_stmt(&mut self) -> Expr {
+    fn parse_expr_stmt(&mut self) -> Stmt {
         trace!("Parsing expression statement");
 
         let expr = self.parse_expr();
-        match_error!(self, Token::Semicolon, "Expected ';' after expression statement");
-        expr
+        match_error_stmt!(self, Token::Semicolon, "Expected ';' after expression statement");
+        Stmt::Expression { expr }
     }
 
     /// Parse a conditional statement.
     /// 
     /// **Conditional** ::= 'if' '(' <[Expression](Self::parse_expr)> ')' <[Body](Self::parse_body)> ('else' <[Body](Self::parse_body)>)?
-    fn parse_conditional_stmt(&mut self) -> Expr {
+    fn parse_conditional_stmt(&mut self) -> Stmt {
         trace!("Parsing conditional expression");
         _ = self.next();
 
-        match_error!(self, Token::LParen, "Expect '(' after 'if' keyword");
+        match_error_stmt!(self, Token::LParen, "Expect '(' after 'if' keyword");
 
-        let cond = Box::new(self.parse_expr());
+        let cond = self.parse_expr();
 
-        match_error!(self, Token::RParen, "Expect ')' after condtion");
+        match_error_stmt!(self, Token::RParen, "Expect ')' after condtion");
         
         let then = self.parse_body();
 
@@ -367,69 +399,69 @@ impl<'a> Parser<'a> {
             Ok(_) => {},
             Err(err) => {
                 let message = err.message;
-                return self.err_recover(message)
+                return self.err_recover_stmt(message)
             }
         }
 
-        Expr::Conditional { cond, then, otherwise }
+        Stmt::Conditional { cond, then, otherwise }
     }
 
     // TODO: Implement optional useage of each for field
     /// Parse a for expression.
     /// 
     /// **For** ::= 'for' '(' <[Ident](Token::Ident)> '=' <[Expression](Self::parse_expr)> ';' <[Expression](Self::parse_expr)> ';' <[Expression](Self::parse_expr)> ')' '{' <[Body](Self::parse_body)> '}'
-    fn parse_for_stmt(&mut self) -> Expr {
+    fn parse_for_stmt(&mut self) -> Stmt {
         trace!("Parsing for expression");
         _ = self.next();
 
-        match_error!(self, Token::LBrace, "Expected '(' after for");
+        match_error_stmt!(self, Token::LBrace, "Expected '(' after for");
 
         let var_name = match self.next() {
             Ok(Token::Ident(ident)) => ident,
-            Ok(_) => return self.err_recover("Expected identifier in initialiser"),
-            Err(err) => return self.err_recover(err.message),
+            Ok(_) => return self.err_recover_stmt("Expected identifier in initialiser"),
+            Err(err) => return self.err_recover_stmt(err.message),
         };
 
-        match_error!(self, Token::Op('='), "Expected '=' after identifier");
+        match_error_stmt!(self, Token::Op('='), "Expected '=' after identifier");
 
-        let start = Box::new(self.parse_expr());
+        let start = self.parse_expr();
 
-        match_error!(self, Token::Semicolon, "Expected ';' after initialiser");
+        match_error_stmt!(self, Token::Semicolon, "Expected ';' after initialiser");
 
-        let condition = Box::new(self.parse_expr());
+        let condition = self.parse_expr();
 
-        match_error!(self, Token::Semicolon, "Expected ';' after condition");
+        match_error_stmt!(self, Token::Semicolon, "Expected ';' after condition");
 
-        let step = Box::new(self.parse_expr());
+        let step = self.parse_expr();
 
-        match_error!(self, Token::RParen, "Expected ')' after for definition");
+        match_error_stmt!(self, Token::RParen, "Expected ')' after for definition");
         
         let body = self.parse_body();
 
-        Expr::For { var_name, start, condition, step, body }
+        Stmt::For { var_name, start, condition, step, body }
     }
 
     // TODO: Allow multiple assignments and definitions without assignment
     /// Parse a var expression.
     /// 
     /// **Var** ::= 'var' <[Ident](Token::Ident)> '=' <[Expression](Self::parse_expr)> ';'
-    fn parse_var_stmt(&mut self) -> Expr {
+    fn parse_var_stmt(&mut self) -> Stmt {
         trace!("Parsing var expression");
         _ = self.next();
 
         let variable = match self.next() {
             Ok(Token::Ident(id)) => id,
-            Ok(_) => return self.err_recover("Expected identifier"),
-            Err(err) => return self.err_recover(err.message),
+            Ok(_) => return self.err_recover_stmt("Expected identifier"),
+            Err(err) => return self.err_recover_stmt(err.message),
         };
 
-        match_error!(self, Token::Op('='), "Expected '=' after identifier");
+        match_error_stmt!(self, Token::Op('='), "Expected '=' after identifier");
 
         let body = Box::new(self.parse_expr());
 
-        match_error!(self, Token::Semicolon, "Expected ';' after assignment");
+        match_error_stmt!(self, Token::Semicolon, "Expected ';' after assignment");
 
-        Expr::VarAssign { variable, body }
+        Stmt::Expression { expr: Expr::VarAssign { variable, body } }
     }
 
     /// Parse any expression, dealing with operator precedences.
@@ -447,7 +479,7 @@ impl<'a> Parser<'a> {
             Ok(Token::Ident(name)) => self.parse_ident(name),
             Ok(Token::LParen) => {
                 let left = self.expr_binding(0);
-                match_error!(self, Token::RParen, "Expected closing ')'");
+                match_error_expr!(self, Token::RParen, "Expected closing ')'");
                 left
             }
             Ok(Token::Op(op)) => {
@@ -455,8 +487,8 @@ impl<'a> Parser<'a> {
                 let right = Box::new(self.expr_binding(r_binding));
                 Expr::Unary { op, right }
             },
-            Ok(_) => return self.err_recover("Expected operator or number"),
-            Err(err) => return self.err_recover(err.message),
+            Ok(_) => return self.err_recover_expr("Expected operator or number"),
+            Err(err) => return self.err_recover_expr(err.message),
         };
 
         loop {
@@ -466,7 +498,7 @@ impl<'a> Parser<'a> {
                 Ok(_) => return left,
                 Err(err) => {
                     let message = err.message;
-                    return self.err_recover(message)
+                    return self.err_recover_expr(message)
                 },
             }.clone();
 
@@ -536,23 +568,22 @@ impl<'a> Parser<'a> {
                     match self.peek() {
                         Ok(Token::Comma) => { _ = self.next(); },
                         Ok(Token::RParen) => break,
-                        Ok(_) => return self.err_recover("Expected ',' or ')' after expression"),
+                        Ok(_) => return self.err_recover_expr("Expected ',' or ')' after expression"),
                         Err(err) => {
                             let message = err.message;
-                            return self.err_recover(message)
+                            return self.err_recover_expr(message)
                         },
                     }
                 }
 
-                match_error!(self, Token::RParen, "Expected ')' after args list");
+                match_error_expr!(self, Token::RParen, "Expected ')' after args list");
 
                 Expr::Call { fn_name: name, args }
-
             },
             Ok(_) => Expr::Variable(name),
             Err(err) => {
                 let message = err.message;
-                self.err_recover(message)
+                self.err_recover_expr(message)
             },
         }
     }    
@@ -560,11 +591,11 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::parser::{Expr, Function, Prototype};
+    use crate::parser::{Expr, Stmt};
 
     use super::Parser;
 
-    fn parse_no_error(input: &str) -> Function {
+    fn parse_no_error(input: &str) -> Vec<Stmt> {
         let mut parser = Parser::new(input);
         parser.parse().unwrap()
     }
@@ -576,21 +607,22 @@ mod tests {
     }
 
     // TODO: Right now all tests have a single top level function in line with the current grammar, when the grammar is expanded add new tests
+    // TODO: Write some functions or macros to clean up this boiler plate
     #[test]
     fn empty_func() {
         let res = parse_no_error("fun test() {}");
         assert_eq!(
-            Function { 
-                prototype: Prototype { 
+            Stmt::Function { 
+                prototype: Box::new(Stmt::Prototype { 
                     name: "test".to_string(), 
                     args: vec![], 
                     is_op: false, 
                     prec: 0 
-                }, 
+                }),
                 body: vec![], 
                 is_anon: false 
             }, 
-            res
+            res[0]
         )
     }
 
@@ -598,17 +630,17 @@ mod tests {
     fn func_arg() {
         let res = parse_no_error("fun test(x, y, z) {}");
         assert_eq!(
-            Function {
-                prototype: Prototype { 
+            Stmt::Function {
+                prototype: Box::new(Stmt::Prototype { 
                     name: "test".to_string(),
                     args: vec!["x".to_string(), "y".to_string(), "z".to_string()],
                     is_op: false,
                     prec: 0
-                }, 
+                }), 
                 body: vec![],
                 is_anon: false
             },
-            res
+            res[0]
         )
     }
 
@@ -616,17 +648,17 @@ mod tests {
     fn func_body() {
         let res = parse_no_error("fun test() { 4 + 5; }");
         assert_eq!(
-            Function {
-                prototype: Prototype {
+            Stmt::Function {
+                prototype: Box::new(Stmt::Prototype {
                     name: "test".to_string(),
                     args: vec![],
                     is_op: false,
                     prec: 0
-                }, 
-                body: vec![Expr::Binary { op: '+', left: Box::new(Expr::Number(4f64)), right: Box::new(Expr::Number(5f64)) }], 
+                }),
+                body: vec![Stmt::Expression { expr: Expr::Binary { op: '+', left: Box::new(Expr::Number(4f64)), right: Box::new(Expr::Number(5f64)) } }], 
                 is_anon: false
             },
-            res
+            res[0]
         )
     }
 
@@ -634,20 +666,20 @@ mod tests {
     fn func_multiple_body() {
         let res = parse_no_error("fun test() { 4 + 5; 5 - 6; }");
         assert_eq!(
-            Function {
-                prototype: Prototype {
+            Stmt::Function {
+                prototype: Box::new(Stmt::Prototype {
                     name: "test".to_string(),
                     args: vec![],
                     is_op: false,
                     prec: 0
-                }, 
+                }), 
                 body: vec![
-                    Expr::Binary { op: '+', left: Box::new(Expr::Number(4f64)), right: Box::new(Expr::Number(5f64)) },
-                    Expr::Binary { op: '-', left: Box::new(Expr::Number(5f64)), right: Box::new(Expr::Number(6f64)) }    
+                    Stmt::Expression { expr: Expr::Binary { op: '+', left: Box::new(Expr::Number(4f64)), right: Box::new(Expr::Number(5f64)) } },
+                    Stmt::Expression { expr: Expr::Binary { op: '-', left: Box::new(Expr::Number(5f64)), right: Box::new(Expr::Number(6f64)) } }    
                 ], 
                 is_anon: false
             },
-            res
+            res[0]
         )
     }
 
@@ -655,15 +687,15 @@ mod tests {
     fn complex_arithmetic() {
         let res = parse_no_error("fun test() { 4 + 5 * 5 - 6 / ((5 + 6) * 6); }");
         assert_eq!(
-            Function {
-                prototype: Prototype {
+            Stmt::Function {
+                prototype: Box::new(Stmt::Prototype {
                     name: "test".to_string(),
                     args: vec![],
                     is_op: false,
                     prec: 0
-                }, 
+                }), 
                 body: vec![
-                    Expr::Binary {
+                    Stmt::Expression { expr: Expr::Binary {
                         op: '-',
                         left: Box::new(Expr::Binary {
                             op: '+',
@@ -679,11 +711,11 @@ mod tests {
                                 right: Box::new(Expr::Number(6f64)),        
                             })
                         })
-                    }
+                    }}
                 ], 
                 is_anon: false
             },
-            res
+            res[0]
         )
     }
 
@@ -691,17 +723,17 @@ mod tests {
     fn call() {
         let res = parse_no_error("fun test() { function(); }");
         assert_eq!(
-            Function {
-                prototype: Prototype {
+            Stmt::Function {
+                prototype: Box::new(Stmt::Prototype {
                     name: "test".to_string(),
                     args: vec![],
                     is_op: false,
                     prec: 0
-                },
-                body: vec![Expr::Call { fn_name: "function".to_string(), args: vec![] }],
+                }),
+                body: vec![Stmt::Expression { expr: Expr::Call { fn_name: "function".to_string(), args: vec![] } }],
                 is_anon: false,
             }, 
-            res
+            res[0]
         )
     }
 
@@ -709,17 +741,17 @@ mod tests {
     fn call_args() {
         let res = parse_no_error("fun test() { function(x, y, z); }");
         assert_eq!(
-            Function {
-                prototype: Prototype {
+            Stmt::Function {
+                prototype: Box::new(Stmt::Prototype {
                     name: "test".to_string(),
                     args: vec![],
                     is_op: false,
                     prec: 0
-                },
-                body: vec![Expr::Call { fn_name: "function".to_string(), args: vec![Expr::Variable("x".to_string()), Expr::Variable("y".to_string()), Expr::Variable("z".to_string())] }],
+                }),
+                body: vec![Stmt::Expression { expr: Expr::Call { fn_name: "function".to_string(), args: vec![Expr::Variable("x".to_string()), Expr::Variable("y".to_string()), Expr::Variable("z".to_string())] } }],
                 is_anon: false,
             }, 
-            res
+            res[0]
         )
     }
 
@@ -727,19 +759,19 @@ mod tests {
     fn var_assignment() {
         let res = parse_no_error("fun test() { var x = 4 + 5; }");
         assert_eq!(
-            Function {
-                prototype: Prototype {
+            Stmt::Function {
+                prototype: Box::new(Stmt::Prototype {
                     name: "test".to_string(),
                     args: vec![],
                     is_op: false,
                     prec: 0
-                }, 
+                }),
                 body: vec![
-                    Expr::VarAssign { variable: "x".to_string(), body: Box::new(Expr::Binary { op: '+', left: Box::new(Expr::Number(4f64)), right: Box::new(Expr::Number(5f64)) }) }
+                    Stmt::Expression { expr: Expr::VarAssign { variable: "x".to_string(), body: Box::new(Expr::Binary { op: '+', left: Box::new(Expr::Number(4f64)), right: Box::new(Expr::Number(5f64)) }) } }
                 ], 
                 is_anon: false
             },
-            res
+            res[0]
         )
     }
 

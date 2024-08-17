@@ -1,296 +1,391 @@
 use std::{borrow::Borrow, collections::HashMap};
+use inkwell::{
+    builder::Builder, context::Context, module::Module, passes::PassBuilderOptions, 
+    targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine},
+    types::BasicMetadataTypeEnum, values::{AsValueRef, BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, PointerValue}, 
+    OptimizationLevel,
+};
+use crate::{parser::{Expr, Parser, Stmt}, trace};
 
-use inkwell::{builder::Builder, context::Context, module::Module, types::BasicMetadataTypeEnum, values::{BasicMetadataValueEnum, BasicValueEnum, FloatValue, FunctionValue, PointerValue}};
-
-use crate::parser::{Expr, Function, Prototype};
-
-pub struct Compiler<'a, 'ctx> {
-    pub context: &'ctx Context,
-    pub builder: &'a Builder<'ctx>,
-    pub module: &'a Module<'ctx>,
-    pub function: &'a Function,
-    
-    variables: HashMap<String, PointerValue<'ctx>>,
-    fn_value_opt: Option<FunctionValue<'ctx>>,
+pub struct LLVMInfo<'ctx> {
+    context: &'ctx Context,
+    builder: Builder<'ctx>,
+    pub module: Module<'ctx>,
 }
 
-impl<'a, 'ctx> Compiler<'a, 'ctx> {
-    pub fn compile(context: &'ctx Context, builder: &'a Builder<'ctx>, module: &'a Module<'ctx>, function: &Function) -> Result<FunctionValue<'ctx>, &'static str> {
-        let mut compiler = Compiler {
-            context,
-            builder,
-            module,
-            function,
-            fn_value_opt: None,
-            variables: HashMap::new()
+pub struct Compiler<'ctx> {
+    llvm_info: LLVMInfo<'ctx>,
+    top_level: Vec<Stmt>,
+    globals: HashMap<String, PointerValue<'ctx>>,
+}
+
+// TODO: Re-think some of the architecture here, some of the function signatures are pretty monstorous
+impl<'ctx> Compiler<'ctx> {
+    /// Create a new compiler for the given source code. If there are errors whilst parsing the source code they will be returned.
+    pub fn new(source: &str, context: &'ctx Context) -> Result<Self, Vec<&'static str>> {
+        let builder = context.create_builder();
+        let module = context.create_module("main");
+        let llvm_info = LLVMInfo { context, builder, module };
+
+        let mut parser = Parser::new(&source);
+        let top_level = parser.parse()?;
+
+        Ok(Compiler {
+            llvm_info,
+            top_level,
+            globals: HashMap::new(),
+        })
+    }
+
+    /// Compile the source code and get the module produced or any errors encountered.
+    pub fn compile(mut self) -> Result<LLVMInfo<'ctx>, &'static str> {
+        for stmt in &self.top_level {
+            match stmt {
+                Stmt::Function { ref prototype, ref body, is_anon: _ } => _ = Compiler::compile_fn(&mut self.llvm_info, prototype, body)?, // TODO: At some point we will need to collect these in a set of globals
+                _ => unimplemented!()
+            }
+        }
+
+        self.run_optimisations();
+        Ok(self.llvm_info)
+    }
+
+    /// Compile a given function.
+    fn compile_fn(llvm_info: &mut LLVMInfo<'ctx>, prototype: &Box<Stmt>, body: &Vec<Stmt>) -> Result<FunctionValue<'ctx>, &'static str> {
+        // TODO: Maybe deal with this better, altho this error should never occur and cannot be recovered from at this stage
+        let (name, args) = match prototype.as_ref() {
+            Stmt::Prototype { name, args, is_op: _, prec: _ } => (name, args),
+            _ => panic!("FATAL: Attempting to compile invalid function statement, this indicates the parser has failed catasrophically"),
         };
 
-        compiler.compile_fn()
+        let function = Compiler::compile_prototype(llvm_info, name, args)?;
+
+        if body.is_empty() { return Ok(function) }
+
+        // Prepare to emit IR for function arguments
+        let entry = llvm_info.context.append_basic_block(function, "entry");
+        llvm_info.builder.position_at_end(entry);
+        let mut variables = HashMap::with_capacity(args.len());
+
+        // Create mutable allocations for the arguments
+        for (i, arg) in function.get_param_iter().enumerate() {
+            let arg_name = args[i].as_str();
+            let alloca = Compiler::create_entry_block_alloca(llvm_info.context, function, arg_name);
+
+            llvm_info.builder.build_store(alloca, arg).unwrap();
+            variables.insert(args[i].clone(), alloca);
+        }
+
+        // Compile the function body and provide a return value
+        // TODO: The parser should collect return type info and then any return statements will be compiled in the statement
+        for stmt in body {
+            Compiler::compile_stmt(llvm_info, function, &stmt, &mut variables)?;
+        }
+        let return_type = llvm_info.context.f64_type().const_float(0f64);
+        llvm_info.builder.build_return(Some(&return_type)).unwrap();
+
+        if function.verify(true) {
+            Ok(function)
+        } else {
+            unsafe { function.delete(); }
+
+            Err("Invalid generated function")
+        }
     }
 
-    fn get_function(&self, name: &str) -> Option<FunctionValue<'ctx>> {
-        self.module.get_function(name)
+    /// Compile a given prototype.
+    fn compile_prototype(llvm_info: &mut LLVMInfo<'ctx>, name: &String, args: &Vec<String>) -> Result<FunctionValue<'ctx>, &'static str> {
+        trace!("Compiling prototype");
+        // TODO: This function needs to be reworked when types are added
+        let args_types = std::iter::repeat(llvm_info.context.f64_type()).take(args.len()).map(|f| f.into()).collect::<Vec<BasicMetadataTypeEnum>>();
+
+        let fn_type = llvm_info.context.f64_type().fn_type(args_types.as_slice(), false);
+        let fn_val = llvm_info.module.add_function(name.as_str(), fn_type, None);
+
+        for (i, arg) in fn_val.get_param_iter().enumerate() {
+            arg.into_float_value().set_name(args[i].as_str());
+        }
+
+        Ok(fn_val)
     }
 
-    fn fn_value(&self) -> FunctionValue<'ctx> {
-        self.fn_value_opt.unwrap()
-    }
-
-    /// Creates a new stack allocation instruction in the entry block of the function.
-    fn create_entry_block_alloca(&self, name: &str) -> PointerValue<'ctx> {
-        let builder = self.context.create_builder();
-        let entry = self.fn_value().get_first_basic_block().unwrap();
+    /// Creates a new stack allocation instruction in the entry block of a function.
+    fn create_entry_block_alloca(context: &'ctx Context, fn_value: FunctionValue, name: &str) -> PointerValue<'ctx> {
+        let builder = context.create_builder();
+        let entry = fn_value.get_first_basic_block().unwrap();
 
         match entry.get_first_instruction() {
             Some(instr) => builder.position_before(&instr),
             None => builder.position_at_end(entry),
         }
 
-        builder.build_alloca(self.context.f64_type(), name).unwrap()
+        builder.build_alloca(context.f64_type(), name).unwrap()
     }
 
-    pub fn build_load(&self, ptr: PointerValue<'ctx>, name: &str) -> BasicValueEnum<'ctx> {
-        self.builder.build_load(self.context.f64_type(), ptr, name).unwrap()
+    // TODO: Need to return local variables from expressions, need to think about it as it will be a bit complex
+    /// Compile a statement.
+    fn compile_stmt(llvm_info: &mut LLVMInfo<'ctx>, parent: FunctionValue, stmt: &Stmt, variables: &mut HashMap<String, PointerValue<'ctx>>) -> Result<Option<(String, PointerValue<'ctx>)>, &'static str> {
+        match stmt {
+            Stmt::Conditional { ref cond, ref then, ref otherwise } => { Compiler::compile_conditional(llvm_info, parent, variables, cond, then, otherwise)?; },
+            Stmt::For { ref var_name, ref start, ref condition, ref step, ref body } => { Compiler::compile_for(llvm_info, parent, variables, var_name, start, condition, step, body)?; },
+            Stmt::Expression { expr } => { Compiler::compile_expr(llvm_info, parent, variables, expr)?; },
+            _ => panic!("FATAL: Attempting to compile invalid statement, this indicates the parser has failed catasrophically")
+        }
+
+        Ok(None)
     }
 
-    fn compile_expr(&mut self, expr: &Expr) -> Result<FloatValue<'ctx>, &'static str> {
-        match *expr {
-            Expr::Number(num) => Ok(self.context.f64_type().const_float(num)),
-            Expr::Variable(ref name) => match self.variables.get(name.as_str()) {
-                Some(var) => Ok(self.build_load(*var, name.as_str()).into_float_value()),
+    /// Build the body of some statement, ensuring local variables shadow higher ones.
+    fn build_local_body(llvm_info: &mut LLVMInfo<'ctx>, parent: FunctionValue, variables: &mut HashMap<String, PointerValue<'ctx>>, body: &Vec<Stmt>) -> Result<(), &'static str> {
+        let mut local_vars = Vec::new();
+        let mut old_vars = Vec::new();
+        for stmt in body {
+            match Compiler::compile_stmt(llvm_info, parent, stmt, variables)? {
+                Some((local, ptr)) => {
+                    local_vars.push(local.clone());
+                    match variables.get(&local) {
+                        Some(_) => old_vars.push(variables.remove_entry(&local).unwrap()),
+                        None => { variables.insert(local, ptr); },
+                    }
+                },
+                None => {},
+            }
+        }
+
+        // Remove any variables added in the local scope
+        for var in local_vars { variables.remove(&var); }
+
+        // Re-add any shadowed variables
+        for (name, value) in old_vars { variables.insert(name, value); }
+
+        Ok(())
+    }
+
+    /// Compile conditional.
+    fn compile_conditional(llvm_info: &mut LLVMInfo<'ctx>, parent: FunctionValue, variables: &mut HashMap<String, PointerValue<'ctx>>, cond: &Expr, then: &Vec<Stmt>, otherwise: &Vec<Stmt>) -> Result<(), &'static str> {
+        // TODO: Decide how variables work here
+        let context = llvm_info.context;
+
+        let zero_const = context.f64_type().const_float(0.);
+        let cond = Compiler::compile_expr(llvm_info, parent, variables, cond)?;
+        // TODO: When types are added, will need to change this
+        let cond = llvm_info.builder.build_float_compare(inkwell::FloatPredicate::ONE, cond, zero_const, "ifcond").unwrap();
+
+        let then_bb = context.append_basic_block(parent, "then");
+        let else_bb = context.append_basic_block(parent, "else");
+        let cont_bb = context.append_basic_block(parent, "ifcont");
+        llvm_info.builder.build_conditional_branch(cond, then_bb, else_bb).unwrap();
+
+        // TODO: When types are added and return statements are added, these conditional branches will need looking at
+        llvm_info.builder.position_at_end(then_bb);
+
+        // Build then body
+        Compiler::build_local_body(llvm_info, parent, variables, then)?;
+
+        llvm_info.builder.build_unconditional_branch(cont_bb).unwrap();
+        let then_bb = llvm_info.builder.get_insert_block().unwrap();
+        let then_val = context.f64_type().const_float(0f64);
+
+        llvm_info.builder.position_at_end(else_bb);
+        
+        // Build otherwise body
+        Compiler::build_local_body(llvm_info, parent, variables, otherwise)?;
+
+        llvm_info.builder.build_unconditional_branch(cont_bb).unwrap();
+        let else_bb = llvm_info.builder.get_insert_block().unwrap();
+        let else_val = context.f64_type().const_float(0f64);
+
+        // Build the phi for the if statement
+        llvm_info.builder.position_at_end(cont_bb);
+        let phi = llvm_info.builder.build_phi(context.f64_type(), "iftmp").unwrap();
+        phi.add_incoming(&[(&then_val, then_bb), (&else_val, else_bb)]);
+
+        Ok(())
+    }
+
+    /// Compile for loop.
+    fn compile_for(
+        llvm_info: &mut LLVMInfo<'ctx>,
+        parent: FunctionValue, 
+        variables: &mut HashMap<String, PointerValue<'ctx>>, 
+        var_name: &String, 
+        start: &Expr, 
+        condition: &Expr, 
+        step: &Expr, 
+        body: &Vec<Stmt>
+    ) -> Result<(), &'static str> {
+        let context = llvm_info.context;
+
+        // Compile the starting experssion
+        let start_alloca = Compiler::create_entry_block_alloca(context, parent, var_name);
+        let start = Compiler::compile_expr(llvm_info, parent, variables, start)?;
+        llvm_info.builder.build_store(start_alloca, start).unwrap();
+
+        // Deal with variable shadowing
+        let old_val = variables.remove(var_name.as_str());
+        variables.insert(var_name.to_owned(), start_alloca);
+
+        let loop_bb = context.append_basic_block(parent, "loop");
+
+        llvm_info.builder.build_unconditional_branch(loop_bb).unwrap();
+        llvm_info.builder.position_at_end(loop_bb);
+
+        // Build the loop body
+        Compiler::build_local_body(llvm_info, parent, variables, &body)?;
+
+        // Build the step
+        let step = Compiler::compile_expr(llvm_info, parent, variables, step)?;
+
+        // Build the end condition
+        let end_cond = Compiler::compile_expr(llvm_info, parent, variables, condition)?;
+
+        // TODO: Will need to re-do this when types are implemented
+        let curr_var = Compiler::build_load(llvm_info, start_alloca, var_name);
+        let next_var = llvm_info.builder.build_float_add(curr_var.into_float_value(), step, "nextvar").unwrap();
+
+        llvm_info.builder.build_store(start_alloca, next_var).unwrap();
+
+        let end_cond = llvm_info.builder
+            .build_float_compare(inkwell::FloatPredicate::ONE, end_cond, context.f64_type().const_float(0.0),"loopcond")
+            .unwrap();
+        let after_bb = context.append_basic_block(parent, "afterloop");
+
+        llvm_info.builder.build_conditional_branch(end_cond, loop_bb, after_bb).unwrap();
+        llvm_info.builder.position_at_end(after_bb);
+
+        // Deal with variable shadowing
+        variables.remove(var_name);
+        if let Some(val) = old_val { variables.insert(var_name.to_owned(), val); }
+
+        Ok(())
+    }
+
+    // TODO: This needs re-working when types are added
+    /// Compile an expression
+    fn compile_expr(llvm_info: &mut LLVMInfo<'ctx>, parent: FunctionValue, variables: &mut HashMap<String, PointerValue<'ctx>>, expr: &Expr) -> Result<FloatValue<'ctx>, &'static str> {
+        match expr {
+            Expr::Call { ref fn_name, ref args } => Compiler::compile_call_expr(llvm_info, parent, variables, fn_name, args),
+            Expr::Number(num) => Ok(llvm_info.context.f64_type().const_float(*num)),
+            Expr::Variable(ref name) => match variables.get(name.as_str()) {
+                // TODO: This becomes more complex when we add types
+                Some(var) => Ok(Compiler::build_load(llvm_info, *var, name.as_str()).into_float_value()),
                 None => Err("Could not find a matching variable"),
             },
             Expr::VarAssign { ref variable, ref body } => {
-                let body_val = self.compile_expr(body)?;
-                match self.variables.get(variable) {
-                    Some(variable) => {
-                        self.builder.build_store(*variable, body_val);
-                    },
+                let body_val = Compiler::compile_expr(llvm_info, parent, variables, body)?;
+                match variables.get(variable) {
+                    Some(variable) => { llvm_info.builder.build_store(*variable, body_val); },
                     None => {
-                        let alloca = self.create_entry_block_alloca(&variable);
-                        self.builder.build_store(alloca, body_val);
+                        let alloca = Compiler::create_entry_block_alloca(llvm_info.context, parent, &variable);
+                        llvm_info.builder.build_store(alloca, body_val);
                     }
                 }
 
                 Ok(body_val)
             },
             Expr::Binary { op, ref left, ref right } => {
-                if op == '=' {
+                if *op == '=' {
                     let var_name = match *left.borrow() {
                         Expr::Variable(ref var_name) => var_name,
                         _ =>  return Err("Expected variable as left-hand operator of assignment"),
                     };
 
-                    let var_val = self.compile_expr(right)?;
-                    let var = self.variables.get(var_name.as_str()).ok_or("Undefined variable")?;
-                    self.builder.build_store(*var, var_val).unwrap();
+                    let var_val = Compiler::compile_expr(llvm_info, parent, variables, right)?;
+                    let var = variables.get(var_name.as_str()).ok_or("Undefined variable")?;
+                    llvm_info.builder.build_store(*var, var_val).unwrap();
                     Ok(var_val)
                 } else {
-                    let lhs = self.compile_expr(left)?;
-                    let rhs = self.compile_expr(right)?;
+                    let lhs = Compiler::compile_expr(llvm_info, parent, variables, left)?;
+                    let rhs = Compiler::compile_expr(llvm_info, parent, variables, right)?;
 
                     match op {
-                        '+' => Ok(self.builder.build_float_add(lhs, rhs, "tmpadd").unwrap()),
-                        '-' => Ok(self.builder.build_float_sub(lhs, rhs, "tmpsub").unwrap()),
-                        '*' => Ok(self.builder.build_float_mul(lhs, rhs, "tmpmul").unwrap()),
-                        '/' => Ok(self.builder.build_float_div(lhs, rhs, "tmpdiv").unwrap()),
+                        '+' => Ok(llvm_info.builder.build_float_add(lhs, rhs, "tmpadd").unwrap()),
+                        '-' => Ok(llvm_info.builder.build_float_sub(lhs, rhs, "tmpsub").unwrap()),
+                        '*' => Ok(llvm_info.builder.build_float_mul(lhs, rhs, "tmpmul").unwrap()),
+                        '/' => Ok(llvm_info.builder.build_float_div(lhs, rhs, "tmpdiv").unwrap()),
                         '<' => Ok({
-                            let cmp = self
+                            let cmp = llvm_info
                                 .builder
                                 .build_float_compare(inkwell::FloatPredicate::ULT, lhs, rhs, "tmpcmp")
                                 .unwrap();
 
-                            self.builder.build_unsigned_int_to_float(cmp, self.context.f64_type(), "tmpbool").unwrap()
+                                llvm_info.builder.build_unsigned_int_to_float(cmp, llvm_info.context.f64_type(), "tmpbool").unwrap()
                         }),
                         '>' => Ok({
-                            let cmp = self
+                            let cmp = llvm_info
                                 .builder
                                 .build_float_compare(inkwell::FloatPredicate::UGT, lhs, rhs, "tmpcmp")
                                 .unwrap();
 
-                            self.builder.build_unsigned_int_to_float(cmp, self.context.f64_type(), "tmpbool").unwrap()
+                                llvm_info.builder.build_unsigned_int_to_float(cmp, llvm_info.context.f64_type(), "tmpbool").unwrap()
                         }),
-                        custom => {
-                            let mut name = String::from("binary");
-                            name.push(custom);
-
-                            match self.get_function(name.as_str()) {
-                                Some(fun) => {
-                                    match self.builder
-                                        .build_call(fun, &[lhs.into(), rhs.into()], "tmpbin").unwrap()
-                                        .try_as_basic_value().left()
-                                    {
-                                        Some(value) => Ok(value.into_float_value()),
-                                        None => Err("Invalid call poduced"),
-                                    }
-                                },
-                                None => Err("Undeifned binary operator"),
-                            }
-                        },
+                        _ => { panic!("FATAL: Attempting to compile invalid binary expression, this indicates the parser has failed catasrophically") }
                     }
                 }
             },
             Expr::Unary { ref op, ref right } => {
                 match op {
                     '-' => {
-                        let val = self.compile_expr(right)?;
-                        Ok(self.builder.build_float_neg(val, "tempneg").unwrap())
+                        let val = Compiler::compile_expr(llvm_info, parent, variables, right)?;
+                        Ok(llvm_info.builder.build_float_neg(val, "tempneg").unwrap())
                     },
-                    _ => { panic!()  }
+                    _ => { panic!("FATAL: Attempting to compile invalid unary expression, this indicates the parser has failed catasrophically") }
                 }
             },
-            Expr::Call { ref fn_name, ref args } => match self.get_function(fn_name.as_str()) {
-                Some(fun) => {
-                    let mut compiled_args = Vec::with_capacity(args.len());
-                    for arg in args {
-                        compiled_args.push(self.compile_expr(arg)?);
-                    }
-
-                    let argsv: Vec<BasicMetadataValueEnum> = compiled_args.iter().by_ref().map(|&val| val.into()).collect();
-
-                    match self.builder
-                        .build_call(fun, argsv.as_slice(), "tmp").unwrap()
-                        .try_as_basic_value().left()
-                    {
-                        Some(value) => Ok(value.into_float_value()),
-                        None => Err("Invalid call produced"),
-                    }
-                },
-                None => Err("Unknown function"),
-            },
-            Expr::Conditional { ref cond, ref then, ref otherwise } => {
-                let parent = self.fn_value();
-                let zero_const = self.context.f64_type().const_float(0.);
-
-                let cond = self.compile_expr(cond)?;
-                let cond = self.builder.build_float_compare(inkwell::FloatPredicate::ONE, cond, zero_const, "ifcond").unwrap();
-
-                let then_bb = self.context.append_basic_block(parent, "then");
-                let else_bb = self.context.append_basic_block(parent, "else");
-                let cont_bb = self.context.append_basic_block(parent, "ifcont");
-
-                self.builder.build_conditional_branch(cond, then_bb, else_bb).unwrap();
-
-                self.builder.position_at_end(then_bb);
-                // TODO: This requires that we treat the conditional flow as an expression and return a value, think about and fix this
-                let mut then_val = self.context.f64_type().const_float(0f64);
-                for expr in then {
-                    then_val = self.compile_expr(expr)?;
-                }
-                self.builder.build_unconditional_branch(cont_bb).unwrap();
-                let then_bb = self.builder.get_insert_block().unwrap();
-
-                self.builder.position_at_end(else_bb);
-                let mut else_val = self.context.f64_type().const_float(0f64);
-                for expr in otherwise {
-                    else_val = self.compile_expr(expr)?;
-                }
-                self.builder.build_unconditional_branch(cont_bb).unwrap();
-                let else_bb = self.builder.get_insert_block().unwrap();
-
-                self.builder.position_at_end(cont_bb);
-                let phi = self.builder.build_phi(self.context.f64_type(), "iftmp").unwrap();
-                phi.add_incoming(&[(&then_val, then_bb), (&else_val, else_bb)]);
-
-                Ok(phi.as_basic_value().into_float_value())
-            },
-            Expr::For { ref var_name, ref start, ref condition, ref step, ref body } => {
-                let parent = self.fn_value();
-
-                let start_alloca = self.create_entry_block_alloca(var_name);
-                let start = self.compile_expr(start)?;
-
-                self.builder.build_store(start_alloca, start).unwrap();
-                let loop_bb = self.context.append_basic_block(parent, "loop");
-
-                self.builder.build_unconditional_branch(loop_bb).unwrap();
-                self.builder.position_at_end(loop_bb);
-
-                let old_val = self.variables.remove(var_name.as_str());
-                self.variables.insert(var_name.to_owned(), start_alloca);
-
-                for expr in body {
-                    self.compile_expr(expr)?;
-                }
-
-                let step = self.compile_expr(step)?;
-
-                let end_cond = self.compile_expr(condition)?;
-
-                let curr_var = self.build_load(start_alloca, var_name);
-                let next_var = self.builder.build_float_add(curr_var.into_float_value(), step, "nextvar").unwrap();
-
-                self.builder.build_store(start_alloca, next_var).unwrap();
-
-                let end_cond = self.builder
-                    .build_float_compare(inkwell::FloatPredicate::ONE, end_cond, self.context.f64_type().const_float(0.0),"loopcond")
-                    .unwrap();
-                let after_bb = self.context.append_basic_block(parent, "afterloop");
-
-                self.builder.build_conditional_branch(end_cond, loop_bb, after_bb).unwrap();
-                self.builder.position_at_end(after_bb);
-
-                self.variables.remove(var_name);
-
-                if let Some(val) = old_val { self.variables.insert(var_name.to_owned(), val); }
-
-                Ok(self.context.f64_type().const_float(0.0))
-            },
-            // TODO: This will need changing, currently this is never created by the parser but at some point it may as a default value
-            Expr::Null => {
-                panic!("This should never happen right now")
-            }
+            Expr::Null => Ok(llvm_info.context.f64_type().const_float(0f64)),
         }
     }
 
-    fn compile_prototype(&self, proto: &Prototype) -> Result<FunctionValue<'ctx>, &'static str> {
-        let args_types = std::iter::repeat(self.context.f64_type()).take(proto.args.len()).map(|f| f.into()).collect::<Vec<BasicMetadataTypeEnum>>();
-        let args_types = args_types.as_slice();
+    // TODO: Types will make this more complex
+    /// Compile a call expression
+    fn compile_call_expr(llvm_info: &mut LLVMInfo<'ctx>, parent: FunctionValue, variables: &mut HashMap<String, PointerValue<'ctx>>, fn_name: &String, args: &Vec<Expr>) -> Result<FloatValue<'ctx>, &'static str> {
+        match variables.get(fn_name) {
+            Some(fun) => {
+                // This is probably naughty
+                let fn_value = unsafe { FunctionValue::new(fun.as_value_ref()).unwrap() };
 
-        let fn_type = self.context.f64_type().fn_type(args_types, false);
-        let fn_val = self.module.add_function(proto.name.as_str(), fn_type, None);
+                let mut compiled_args = Vec::with_capacity(args.len());
+                for expr in args {
+                    compiled_args.push(Compiler::compile_expr(llvm_info, parent, variables, expr)?);
+                }
 
-        for (i, arg) in fn_val.get_param_iter().enumerate() {
-            arg.into_float_value().set_name(proto.args[i].as_str());
+                let argsv: Vec<BasicMetadataValueEnum> = compiled_args.iter().by_ref().map(|&val| val.into()).collect();
+
+                match llvm_info.builder.build_call(fn_value, &argsv, "tmp").unwrap().try_as_basic_value().left() {
+                    Some(value) => Ok(value.into_float_value()),
+                    None => Err("Invalid call produced"),
+                }
+            },
+            None => Err("Unknown function"),
         }
-
-        Ok(fn_val)
     }
 
-    fn compile_fn(&mut self) -> Result<FunctionValue<'ctx>, &'static str> {
-        let proto = &self.function.prototype;
-        let function = self.compile_prototype(proto)?;
+    pub fn build_load(llvm_info: &mut LLVMInfo<'ctx>, ptr: PointerValue<'ctx>, name: &str) -> BasicValueEnum<'ctx> {
+        llvm_info.builder.build_load(llvm_info.context.f64_type(), ptr, name).unwrap()
+    }
 
-        if self.function.body.is_empty() { return Ok(function) }
-
-        let entry = self.context.append_basic_block(function, "entry");
-        self.builder.position_at_end(entry);
-        self.fn_value_opt = Some(function);
-        self.variables.reserve(proto.args.len());
-
-        for (i, arg) in function.get_param_iter().enumerate() {
-            let arg_name = proto.args[i].as_str();
-            let alloca = self.create_entry_block_alloca(arg_name);
-
-            self.builder.build_store(alloca, arg).unwrap();
-            self.variables.insert(proto.args[i].clone(), alloca);
-        }
-
-        // TODO: This is a bad way of doing return values, fix it
-        let mut return_type = self.context.f64_type().const_float(0f64);
-        for stmt in &self.function.body {
-            return_type = self.compile_expr(&stmt)?;
-        }
-        self.builder.build_return(Some(&return_type)).unwrap();
-
-        if function.verify(true) {
-            Ok(function)
-        } else {
-            unsafe {
-                function.delete();
-            }
-
-            Err("Invalid generated function")
-        }
+    fn run_optimisations(&self) {
+        Target::initialize_all(&InitializationConfig::default());
+        let target_triple = TargetMachine::get_default_triple();
+        let target = Target::from_triple(&target_triple).unwrap();
+        let target_machine = target.create_target_machine(
+            &target_triple,
+            "generic",
+            "",
+            OptimizationLevel::None,
+            RelocMode::PIC,
+            CodeModel::Default
+        ).unwrap();
+    
+        let passes: &[&str] = &[
+            "instcombine",
+            "reassociate",
+            "gvn",
+            "simplifycfg",
+            // "basic-aa",
+            "mem2reg",
+        ];
+    
+        self.llvm_info.module.run_passes(passes.join(",").as_str(), &target_machine, PassBuilderOptions::create()).unwrap();
     }
 }

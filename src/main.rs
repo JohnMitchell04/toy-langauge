@@ -1,14 +1,14 @@
-use inkwell::{context::Context, module::Module, passes::PassBuilderOptions, targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine}, OptimizationLevel};
-use parser::Parser;
+use clap::Parser;
 use compiler::Compiler;
-
-use std::{fs, io::Write};
+use inkwell::context::Context;
+use std::{io::Write, path::PathBuf};
 
 mod lexer;
 mod parser;
 mod compiler;
 mod utils;
 
+// TODO: Move these somewhere elese
 macro_rules! print_flush {
     ($( $x:expr ),* ) => {
         print!( $($x, )* );
@@ -28,89 +28,56 @@ pub extern "C" fn printd(x: f64) -> f64 {
     x
 }
 
-fn run_passes_on(module: &Module) {
-    Target::initialize_all(&InitializationConfig::default());
-    let target_triple = TargetMachine::get_default_triple();
-    let target = Target::from_triple(&target_triple).unwrap();
-    let target_machine = target.create_target_machine(
-        &target_triple,
-        "generic",
-        "",
-        OptimizationLevel::None,
-        RelocMode::PIC,
-        CodeModel::Default
-    ).unwrap();
+// TODO: Expand to take multiple paths
+/// Define the CLI interface
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct CLI {
+    #[arg(short, long)]
+    source: PathBuf,
 
-    let passes: &[&str] = &[
-        "instcombine",
-        "reassociate",
-        "gvn",
-        "simplifycfg",
-        // "basic-aa",
-        "mem2reg",
-    ];
+    #[arg[short, long]]
+    name: Option<String>,
 
-    module.run_passes(passes.join(",").as_str(), &target_machine, PassBuilderOptions::create()).unwrap();
+    #[arg(short, long)]
+    output_folder: Option<PathBuf>,
 }
 
 fn main() {
-    let mut args = std::env::args();
-    if args.len() != 2 {
-        println!("Usage: compiler [path]");
-        return;
+    let args = CLI::parse();
+
+    if !args.source.exists() {
+        println!("Error: source file: \"{}\", does not exist", args.source.to_string_lossy());
     }
 
-    // TODO: Improve error handling here
-    let path = args.nth(1).unwrap();
-    let source = fs::read_to_string(path).expect("Could not read from provided file");
+    let input = std::fs::read_to_string(args.source).unwrap();
 
-    // TODO: Improve to allow multiple files
     let context = Context::create();
-    let builder = context.create_builder();
-    let module = context.create_module("main");
-
-    let mut parser = Parser::new(&source);
-
-    let function = match parser.parse() {
-        Ok(func) => {
-            match Compiler::compile(&context, &builder, &module, &func) {
-                Ok(function) => function,
-                Err(err) => {
-                    println!("!> Error compiling function: {}", err);
-                    return;
-                },
+    let compiler = match Compiler::new(&input, &context) {
+        Ok(compiler) => compiler,
+        Err(errors) => {
+            println!("Errors encountered when parsing source:");
+            for error in errors {
+                println!("{}", error)
             }
-        },
-        Err(_) => {
-            println!("Error during parsing:");
-            for err in parser.get_errors() {
-                println!("Error: {}", err);
-            }
-
             return;
-        },
+        }
     };
 
-    run_passes_on(&module);
-
-    if cfg!(debug_assertions) {
-        println!("-> Expression compiled to IR:");
-        function.print_to_stderr();
-    }
-
-    let ee = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
-
-    let fn_name = function.get_name().to_str().unwrap();
-    let maybe_fn = unsafe { ee.get_function::<unsafe extern "C" fn() -> f64>(fn_name) };
-    let compiled_fn = match maybe_fn {
-        Ok(f) => f,
+    let llvm_info = match compiler.compile() {
+        Ok(module) => module,
         Err(err) => {
-            println!("!> Error during execution: {:?}", err);
-            return;
-        },
+            println!("Error: compiling function: {}", err);
+            return
+        }
     };
 
-    unsafe {
-        println!("=> {}", compiled_fn.call());
+    let output = llvm_info.module.print_to_string();
+    if cfg!(debug_assertions) {
+        println!("DEBUG: File compiled to IR: {}", output);
     }
+
+    let mut path = if let Some(folder) = args.output_folder { folder } else { PathBuf::from("./") };
+    if let Some(name) = args.name { path.push(name); path.push(".ll")  } else { path.push("out.ll") };
+    std::fs::write(path, output.to_string());
 }
