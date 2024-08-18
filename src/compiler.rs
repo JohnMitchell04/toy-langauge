@@ -22,7 +22,7 @@ pub struct Compiler<'ctx> {
 // TODO: Re-think some of the architecture here, some of the function signatures are pretty monstorous
 impl<'ctx> Compiler<'ctx> {
     /// Create a new compiler for the given source code. If there are errors whilst parsing the source code they will be returned.
-    pub fn new(source: &str, context: &'ctx Context) -> Result<Self, Vec<&'static str>> {
+    pub fn new(source: &str, context: &'ctx Context) -> Result<Self, Vec<String>> {
         let builder = context.create_builder();
         let module = context.create_module("main");
         let llvm_info = LLVMInfo { context, builder, module };
@@ -51,8 +51,9 @@ impl<'ctx> Compiler<'ctx> {
     }
 
     /// Compile a given function.
-    fn compile_fn(llvm_info: &mut LLVMInfo<'ctx>, prototype: &Box<Stmt>, body: &Vec<Stmt>) -> Result<FunctionValue<'ctx>, &'static str> {
+    fn compile_fn(llvm_info: &mut LLVMInfo<'ctx>, prototype: &Box<Stmt>, body: &[Stmt]) -> Result<FunctionValue<'ctx>, &'static str> {
         // TODO: Maybe deal with this better, altho this error should never occur and cannot be recovered from at this stage
+        trace!("Compiling function");
         let (name, args) = match prototype.as_ref() {
             Stmt::Prototype { name, args, is_op: _, prec: _ } => (name, args),
             _ => panic!("FATAL: Attempting to compile invalid function statement, this indicates the parser has failed catasrophically"),
@@ -94,7 +95,7 @@ impl<'ctx> Compiler<'ctx> {
     }
 
     /// Compile a given prototype.
-    fn compile_prototype(llvm_info: &mut LLVMInfo<'ctx>, name: &String, args: &Vec<String>) -> Result<FunctionValue<'ctx>, &'static str> {
+    fn compile_prototype(llvm_info: &mut LLVMInfo<'ctx>, name: &String, args: &[String]) -> Result<FunctionValue<'ctx>, &'static str> {
         trace!("Compiling prototype");
         // TODO: This function needs to be reworked when types are added
         let args_types = std::iter::repeat(llvm_info.context.f64_type()).take(args.len()).map(|f| f.into()).collect::<Vec<BasicMetadataTypeEnum>>();
@@ -111,6 +112,7 @@ impl<'ctx> Compiler<'ctx> {
 
     /// Creates a new stack allocation instruction in the entry block of a function.
     fn create_entry_block_alloca(context: &'ctx Context, fn_value: FunctionValue, name: &str) -> PointerValue<'ctx> {
+        trace!("Creating entry block allocation");
         let builder = context.create_builder();
         let entry = fn_value.get_first_basic_block().unwrap();
 
@@ -125,6 +127,7 @@ impl<'ctx> Compiler<'ctx> {
     // TODO: Need to return local variables from expressions, need to think about it as it will be a bit complex
     /// Compile a statement.
     fn compile_stmt(llvm_info: &mut LLVMInfo<'ctx>, parent: FunctionValue, stmt: &Stmt, variables: &mut HashMap<String, PointerValue<'ctx>>) -> Result<Option<(String, PointerValue<'ctx>)>, &'static str> {
+        trace!("Compiling statemement");
         match stmt {
             Stmt::Conditional { ref cond, ref then, ref otherwise } => { Compiler::compile_conditional(llvm_info, parent, variables, cond, then, otherwise)?; },
             Stmt::For { ref var_name, ref start, ref condition, ref step, ref body } => { Compiler::compile_for(llvm_info, parent, variables, var_name, start, condition, step, body)?; },
@@ -136,7 +139,8 @@ impl<'ctx> Compiler<'ctx> {
     }
 
     /// Build the body of some statement, ensuring local variables shadow higher ones.
-    fn build_local_body(llvm_info: &mut LLVMInfo<'ctx>, parent: FunctionValue, variables: &mut HashMap<String, PointerValue<'ctx>>, body: &Vec<Stmt>) -> Result<(), &'static str> {
+    fn build_local_body(llvm_info: &mut LLVMInfo<'ctx>, parent: FunctionValue, variables: &mut HashMap<String, PointerValue<'ctx>>, body: &[Stmt]) -> Result<(), &'static str> {
+        trace!("Compiling local body");
         let mut local_vars = Vec::new();
         let mut old_vars = Vec::new();
         for stmt in body {
@@ -162,7 +166,15 @@ impl<'ctx> Compiler<'ctx> {
     }
 
     /// Compile conditional.
-    fn compile_conditional(llvm_info: &mut LLVMInfo<'ctx>, parent: FunctionValue, variables: &mut HashMap<String, PointerValue<'ctx>>, cond: &Expr, then: &Vec<Stmt>, otherwise: &Vec<Stmt>) -> Result<(), &'static str> {
+    fn compile_conditional(
+        llvm_info: &mut LLVMInfo<'ctx>,
+        parent: FunctionValue,
+        variables: &mut HashMap<String, PointerValue<'ctx>>,
+        cond: &Expr,
+        then: &[Stmt],
+        otherwise: &[Stmt]
+    ) -> Result<(), &'static str> {
+        trace!("Compiling conditional statement");
         // TODO: Decide how variables work here
         let context = llvm_info.context;
 
@@ -212,8 +224,9 @@ impl<'ctx> Compiler<'ctx> {
         start: &Expr, 
         condition: &Expr, 
         step: &Expr, 
-        body: &Vec<Stmt>
+        body: &[Stmt]
     ) -> Result<(), &'static str> {
+        trace!("Conpiling for statement");
         let context = llvm_info.context;
 
         // Compile the starting experssion
@@ -231,7 +244,7 @@ impl<'ctx> Compiler<'ctx> {
         llvm_info.builder.position_at_end(loop_bb);
 
         // Build the loop body
-        Compiler::build_local_body(llvm_info, parent, variables, &body)?;
+        Compiler::build_local_body(llvm_info, parent, variables, body)?;
 
         // Build the step
         let step = Compiler::compile_expr(llvm_info, parent, variables, step)?;
@@ -263,6 +276,7 @@ impl<'ctx> Compiler<'ctx> {
     // TODO: This needs re-working when types are added
     /// Compile an expression
     fn compile_expr(llvm_info: &mut LLVMInfo<'ctx>, parent: FunctionValue, variables: &mut HashMap<String, PointerValue<'ctx>>, expr: &Expr) -> Result<FloatValue<'ctx>, &'static str> {
+        trace!("Compiling expression");
         match expr {
             Expr::Call { ref fn_name, ref args } => Compiler::compile_call_expr(llvm_info, parent, variables, fn_name, args),
             Expr::Number(num) => Ok(llvm_info.context.f64_type().const_float(*num)),
@@ -272,18 +286,20 @@ impl<'ctx> Compiler<'ctx> {
                 None => Err("Could not find a matching variable"),
             },
             Expr::VarAssign { ref variable, ref body } => {
+                trace!("Compiling variable assignment");
                 let body_val = Compiler::compile_expr(llvm_info, parent, variables, body)?;
                 match variables.get(variable) {
-                    Some(variable) => { llvm_info.builder.build_store(*variable, body_val); },
+                    Some(variable) => { _ = llvm_info.builder.build_store(*variable, body_val); },
                     None => {
                         let alloca = Compiler::create_entry_block_alloca(llvm_info.context, parent, &variable);
-                        llvm_info.builder.build_store(alloca, body_val);
+                        _ = llvm_info.builder.build_store(alloca, body_val);
                     }
                 }
 
                 Ok(body_val)
             },
             Expr::Binary { op, ref left, ref right } => {
+                trace!("Compiling binary expression");
                 if *op == '=' {
                     let var_name = match *left.borrow() {
                         Expr::Variable(ref var_name) => var_name,
@@ -324,6 +340,7 @@ impl<'ctx> Compiler<'ctx> {
                 }
             },
             Expr::Unary { ref op, ref right } => {
+                trace!("Compiling unary expression");
                 match op {
                     '-' => {
                         let val = Compiler::compile_expr(llvm_info, parent, variables, right)?;
@@ -338,7 +355,8 @@ impl<'ctx> Compiler<'ctx> {
 
     // TODO: Types will make this more complex
     /// Compile a call expression
-    fn compile_call_expr(llvm_info: &mut LLVMInfo<'ctx>, parent: FunctionValue, variables: &mut HashMap<String, PointerValue<'ctx>>, fn_name: &String, args: &Vec<Expr>) -> Result<FloatValue<'ctx>, &'static str> {
+    fn compile_call_expr(llvm_info: &mut LLVMInfo<'ctx>, parent: FunctionValue, variables: &mut HashMap<String, PointerValue<'ctx>>, fn_name: &String, args: &[Expr]) -> Result<FloatValue<'ctx>, &'static str> {
+        trace!("Compiling call expression");
         match variables.get(fn_name) {
             Some(fun) => {
                 // This is probably naughty
@@ -365,6 +383,7 @@ impl<'ctx> Compiler<'ctx> {
     }
 
     fn run_optimisations(&self) {
+        trace!("Running optimisations");
         Target::initialize_all(&InitializationConfig::default());
         let target_triple = TargetMachine::get_default_triple();
         let target = Target::from_triple(&target_triple).unwrap();

@@ -50,7 +50,7 @@ fn main() {
         println!("Error: source file: \"{}\", does not exist", args.source.to_string_lossy());
     }
 
-    let input = std::fs::read_to_string(args.source).unwrap();
+    let input = std::fs::read_to_string(args.source).expect("Error: Could not read file");
 
     let context = Context::create();
     let compiler = match Compiler::new(&input, &context) {
@@ -74,10 +74,10 @@ fn main() {
 
     let output = llvm_info.module.print_to_string();
     if cfg!(debug_assertions) {
-        println!("DEBUG: File compiled to IR: {}", output);
+        println!("DEBUG: File compiled to IR: \n{}", output.to_string());
     }
 
     let mut path = if let Some(folder) = args.output_folder { folder } else { PathBuf::from("./") };
     if let Some(name) = args.name { path.push(name); path.push(".ll")  } else { path.push("out.ll") };
-    std::fs::write(path, output.to_string());
+    std::fs::write(path, output.to_string()).expect("Error: Could not write IR to file");
 }

@@ -61,6 +61,12 @@ pub struct LexError {
 }
 
 impl LexError {
+    pub fn error_message(&self) -> String {
+        String::from(self.message) + ": " + &self.section
+    }
+}
+
+impl LexError {
     pub fn new(message: &'static str, section: String, col: usize, line: usize) -> LexError {
         LexError { message, section, col, line }
     }
@@ -142,7 +148,7 @@ impl<'a> Lexer<'a> {
         if let Some(&char) = self.chars.peek() {
             if !char.is_whitespace() && !matches!(char, '+' | '-' | '<' | '>' | '*' | '/' | '(' | ')' | ',' | ';') {
                 while let Some(char) = self.chars.peek() {
-                    if char.is_whitespace() { break }
+                    if char.is_whitespace() || matches!(char, '+' | '-' | '<' | '>' | '*' | '/' | '(' | ')' | ',' | ';') { break }
 
                     self.chars.next();
                     self.pos += 1;
@@ -153,6 +159,7 @@ impl<'a> Lexer<'a> {
             }
         }
 
+        // TODO: Accept capitalisation but still create an error, that way we can still try and parse the code but also inform the user
         // Keywords
         match &self.input[start..self.pos] {
             "fun" => Ok(Token::Fun),
@@ -338,6 +345,12 @@ mod tests {
     fn invalid_ident() {
         let output = create_lexer_res("tes!t");
         assert_eq!(Err(LexError::new("Invalid identifier", "tes!t".to_string(), 1, 1)), output)
+    }
+
+    #[test]
+    fn invalid_ident_rparen() {
+        let output = create_lexer_res("b!)");
+        assert_eq!(Err(LexError::new("Invalid identifier", "b!".to_string(), 1, 1)), output)
     }
 
     #[test]
