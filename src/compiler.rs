@@ -27,7 +27,7 @@ impl<'ctx> Compiler<'ctx> {
         let module = context.create_module("main");
         let llvm_info = LLVMInfo { context, builder, module };
 
-        let mut parser = Parser::new(&source);
+        let mut parser = Parser::new(source);
         let top_level = parser.parse()?;
 
         Ok(Compiler {
@@ -51,10 +51,10 @@ impl<'ctx> Compiler<'ctx> {
     }
 
     /// Compile a given function.
-    fn compile_fn(llvm_info: &mut LLVMInfo<'ctx>, prototype: &Box<Stmt>, body: &[Stmt]) -> Result<FunctionValue<'ctx>, &'static str> {
+    fn compile_fn(llvm_info: &mut LLVMInfo<'ctx>, prototype: &Stmt, body: &[Stmt]) -> Result<FunctionValue<'ctx>, &'static str> {
         // TODO: Maybe deal with this better, altho this error should never occur and cannot be recovered from at this stage
         trace!("Compiling function");
-        let (name, args) = match prototype.as_ref() {
+        let (name, args) = match prototype {
             Stmt::Prototype { name, args, is_op: _, prec: _ } => (name, args),
             _ => panic!("FATAL: Attempting to compile invalid function statement, this indicates the parser has failed catasrophically"),
         };
@@ -80,7 +80,7 @@ impl<'ctx> Compiler<'ctx> {
         // Compile the function body and provide a return value
         // TODO: The parser should collect return type info and then any return statements will be compiled in the statement
         for stmt in body {
-            Compiler::compile_stmt(llvm_info, function, &stmt, &mut variables)?;
+            Compiler::compile_stmt(llvm_info, function, stmt, &mut variables)?;
         }
         let return_type = llvm_info.context.f64_type().const_float(0f64);
         llvm_info.builder.build_return(Some(&return_type)).unwrap();
@@ -95,13 +95,13 @@ impl<'ctx> Compiler<'ctx> {
     }
 
     /// Compile a given prototype.
-    fn compile_prototype(llvm_info: &mut LLVMInfo<'ctx>, name: &String, args: &[String]) -> Result<FunctionValue<'ctx>, &'static str> {
+    fn compile_prototype(llvm_info: &mut LLVMInfo<'ctx>, name: &str, args: &[String]) -> Result<FunctionValue<'ctx>, &'static str> {
         trace!("Compiling prototype");
         // TODO: This function needs to be reworked when types are added
         let args_types = std::iter::repeat(llvm_info.context.f64_type()).take(args.len()).map(|f| f.into()).collect::<Vec<BasicMetadataTypeEnum>>();
 
         let fn_type = llvm_info.context.f64_type().fn_type(args_types.as_slice(), false);
-        let fn_val = llvm_info.module.add_function(name.as_str(), fn_type, None);
+        let fn_val = llvm_info.module.add_function(name, fn_type, None);
 
         for (i, arg) in fn_val.get_param_iter().enumerate() {
             arg.into_float_value().set_name(args[i].as_str());
@@ -220,7 +220,7 @@ impl<'ctx> Compiler<'ctx> {
         llvm_info: &mut LLVMInfo<'ctx>,
         parent: FunctionValue, 
         variables: &mut HashMap<String, PointerValue<'ctx>>, 
-        var_name: &String, 
+        var_name: &str, 
         start: &Expr, 
         condition: &Expr, 
         step: &Expr, 
@@ -235,7 +235,7 @@ impl<'ctx> Compiler<'ctx> {
         llvm_info.builder.build_store(start_alloca, start).unwrap();
 
         // Deal with variable shadowing
-        let old_val = variables.remove(var_name.as_str());
+        let old_val = variables.remove(var_name);
         variables.insert(var_name.to_owned(), start_alloca);
 
         let loop_bb = context.append_basic_block(parent, "loop");
@@ -291,7 +291,7 @@ impl<'ctx> Compiler<'ctx> {
                 match variables.get(variable) {
                     Some(variable) => { _ = llvm_info.builder.build_store(*variable, body_val); },
                     None => {
-                        let alloca = Compiler::create_entry_block_alloca(llvm_info.context, parent, &variable);
+                        let alloca = Compiler::create_entry_block_alloca(llvm_info.context, parent, variable);
                         _ = llvm_info.builder.build_store(alloca, body_val);
                     }
                 }
@@ -355,7 +355,7 @@ impl<'ctx> Compiler<'ctx> {
 
     // TODO: Types will make this more complex
     /// Compile a call expression
-    fn compile_call_expr(llvm_info: &mut LLVMInfo<'ctx>, parent: FunctionValue, variables: &mut HashMap<String, PointerValue<'ctx>>, fn_name: &String, args: &[Expr]) -> Result<FloatValue<'ctx>, &'static str> {
+    fn compile_call_expr(llvm_info: &mut LLVMInfo<'ctx>, parent: FunctionValue, variables: &mut HashMap<String, PointerValue<'ctx>>, fn_name: &str, args: &[Expr]) -> Result<FloatValue<'ctx>, &'static str> {
         trace!("Compiling call expression");
         match variables.get(fn_name) {
             Some(fun) => {

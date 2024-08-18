@@ -32,7 +32,7 @@ pub extern "C" fn printd(x: f64) -> f64 {
 /// Define the CLI interface
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
-struct CLI {
+struct Cli {
     #[arg(short, long)]
     source: PathBuf,
 
@@ -44,7 +44,7 @@ struct CLI {
 }
 
 fn main() {
-    let args = CLI::parse();
+    let args = Cli::parse();
 
     if !args.source.exists() {
         println!("Error: source file: \"{}\", does not exist", args.source.to_string_lossy());

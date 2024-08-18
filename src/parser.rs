@@ -157,7 +157,7 @@ impl<'a> Parser<'a> {
     /// 
     /// The parser will also create and run a lexer that will process the input.
     pub fn new(input: &'a str) -> Self {
-        let lexer = Lexer::new(input).into_iter().peekable();
+        let lexer = Lexer::new(input).peekable();
 
         Parser { lexer, errors: Vec::new(), panic_mode: false }
     }
@@ -485,14 +485,14 @@ impl<'a> Parser<'a> {
 
         loop {
             let op = match self.peek() {
-                Ok(Token::Op(op)) => op,
+                Ok(Token::Op(ref op)) => *op,
                 Ok(Token::EOF) => break,
                 Ok(_) => return left,
                 Err(err) => {
                     let message = err.error_message();
                     return self.err_recover_expr(message)
                 },
-            }.clone();
+            };
 
             if let Some((l_binding, ())) = self.postfix_binding_power(op) {
                 if l_binding < min_binding { break }
@@ -542,7 +542,7 @@ impl<'a> Parser<'a> {
     /// Get the binding power of some postfix operator.
     fn postfix_binding_power(&self, op: char) -> Option<(u8, ())> {
         match op {
-            _ => return None,
+            _ => None,
         }
     }
 

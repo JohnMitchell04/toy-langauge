@@ -132,13 +132,8 @@ impl<'a> Lexer<'a> {
         let start = self.pos - 1;
         let col_start = self.col - 1;
 
-        loop {
-            let char = match self.chars.peek() {
-                Some(char) => *char,
-                None => break,
-            };
-
-            if char != '_' && !char.is_alphanumeric() { break; }
+        while let Some(char) = self.chars.peek() {
+            if *char != '_' && !char.is_alphanumeric() { break; }
 
             self.chars.next();
             self.pos += 1;
@@ -179,13 +174,8 @@ impl<'a> Lexer<'a> {
         let start = self.pos - 1;
         let col_start = self.col - 1;
 
-        loop {
-            let ch = match self.chars.peek() {
-                Some(ch) => *ch,
-                None => break,
-            };
-
-            if ch != '.' && !ch.is_ascii_hexdigit() { break; }
+        while let Some(char) = self.chars.peek() {
+            if *char != '.' && !char.is_ascii_hexdigit() { break; }
 
             self.chars.next();
             self.pos += 1;
@@ -219,7 +209,7 @@ impl<'a> Lexer<'a> {
                 let char = self.chars.next();
                 self.pos += 1;
 
-                if char == Some('\n') || char == None { break; }
+                if char == Some('\n') || char.is_none() { break; }
             }
 
             self.col = 1;
