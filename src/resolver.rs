@@ -128,7 +128,9 @@ fn resolve_function<'a>(functions: &mut HashMap<String, Function<'a>>, globals: 
     args_scope.parent = Some(globals);
     for arg in args {
         let variable = Variable { scope_location: None, pointer_value: None };
-        args_scope.variables.insert(arg, variable);
+        if let Some(_) = args_scope.variables.insert(arg.clone(), variable) {
+            errors.push("Duplicate argument: ".to_string() + &arg);
+        }
     }
     let args = Rc::from(RefCell::from(args_scope));
 
@@ -198,9 +200,9 @@ fn resolve_expr(scope: Rc<RefCell<Scope>>, expr: &Expr, errors: &mut Vec<String>
     trace!("Resolving expression");
     match expr {
         Expr::VarDeclar { variable, body } => {
+            resolve_expr(scope.clone(), body, errors);
             let variable_val = Variable { scope_location: None, pointer_value: None };
             scope.borrow_mut().variables.insert(variable.to_string(), variable_val);
-            resolve_expr(scope, body, errors)
         },
         Expr::VarAssign { variable, body } => {
             check_variable(scope.clone(), variable, errors);
@@ -243,10 +245,94 @@ fn check_variable(scope: Rc<RefCell<Scope>>, name: &String, errors: &mut Vec<Str
     }
 
     // The variable was not found anywhere
-    errors.push("Error: Could not find variable: ".to_string() + &name)
+    errors.push("Could not find variable: ".to_string() + &name)
 }
 
-// TODO: Write some tests
-// x = x + 1
-// x = (2 + 2) * x
-// x + 3 + x = 5
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, collections::HashMap, rc::Rc};
+    use crate::parser::{self, Stmt};
+    use super::{resolve, Function, Scope};
+
+    fn run<'a>(input: &str) -> (Rc<RefCell<Scope<'a>>>, Vec<Stmt>, HashMap<String, Function<'a>>) {
+        let stmts = parser::Parser::new(input).parse().unwrap();
+        resolve(stmts).unwrap()
+    }
+
+    fn run_err(input: &str) -> Vec<String> {
+        let stmts = parser::Parser::new(input).parse().unwrap();
+        if let Err(errs) = resolve(stmts) { errs } else { panic!("FATAL: The resolver has successfully resolved incorrect input") }
+    }
+
+    #[test]
+    fn global_defintion() {
+        let (globals, _, _) = run("global var x = 5;");
+        assert!(globals.borrow().variables.get("x").is_some())
+    }
+
+    #[test]
+    fn use_global_definition() {
+        let (_, _, functions) = run("global var x = 5; fun test() { x; }");
+        let function = functions.get("test").unwrap();
+        assert!(function.scope.borrow().variables.get("x").is_some())
+    }
+
+    #[test]
+    fn function_definition() {
+        let (_, _, functions) = run("fun test() {}");
+        assert!(functions.get("test").is_some())
+    }
+
+    #[test]
+    fn undeclared_variable() {
+        let err = run_err("fun test() { var x = y; }");
+        assert_eq!(vec!["Could not find variable: y"], err)
+    }
+
+    #[test]
+    fn variable_use_before_declar() {
+        let err = run_err("fun test() { x; var x = 1; }");
+        assert_eq!(vec!["Could not find variable: x"], err)
+    }
+
+    #[test]
+    fn variable_use_in_declaration() {
+        let err = run_err("fun test() { var x = x + 1; }");
+        assert_eq!(vec!["Could not find variable: x"], err)
+    }
+
+    #[test]
+    fn variable_use_after_declar() {
+        let (_, _, functions) = run("fun test() { var x = 1; x; }");
+        let function = functions.get("test").unwrap();
+        assert!(function.scope.borrow().variables.get("x").is_some())
+    }
+
+    #[test]
+    fn variable_redeclar() {
+        let _ = run("fun test() { var x = 1; var x = 2; }");
+    }
+
+    #[test]
+    fn global_redeclar() {
+        let err = run_err("global var x = 1; global var x = 2;");
+        assert_eq!(vec!["Global: x is already defined"], err);
+    }
+
+    #[test]
+    fn arg() {
+        let (_, _, functions) = run("fun test(x) {}");
+        let function = functions.get("test").unwrap();
+        assert!(function.args.borrow().variables.get("x").is_some())
+    }
+
+    #[test]
+    fn duplicate_arg() {
+        let err = run_err("fun test(x, x) {}");
+        assert_eq!(vec!["Duplicate argument: x"], err)
+    }
+
+    // TODO: Test nested
+
+    // TODO: When nested bodies are added, test them
+}

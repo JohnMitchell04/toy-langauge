@@ -293,6 +293,7 @@ impl<'a> Parser<'a> {
         stmts
     }
 
+    // TODO: Allow body statements i.e. code enclosed in { } to produce a new scope
     /// Parse a statement.
     /// 
     /// **Statement** ::=
