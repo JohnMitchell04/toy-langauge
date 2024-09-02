@@ -202,13 +202,10 @@ impl<'a> Parser<'a> {
 
     /// Parse a global statement
     /// 
-    /// **Global** ::= 'global' 'var' = <[Expression](Self::parse_expr)>
+    /// **Global** ::= 'global' <[Var](Self::parse_var_stmt)>
     fn parse_global(&mut self) -> Stmt {
         trace!("Parsing global expression");
         _ = self.next();
-
-        match_no_error!(self, Token::Var, "Expected 'var' keyword");
-        match_no_error!(self, Token::Op('='), "Expected '=' after var keyword");
 
         self.parse_var_stmt()
     } 
@@ -757,6 +754,12 @@ mod tests {
             ]),
             res[0]
         )
+    }
+
+    #[test]
+    fn global_declar() {
+        let res = parse_no_error("global var x = 5;");
+        assert_eq!(vec![Stmt::Expression { expr: Expr::VarDeclar { variable: "x".to_string(), body: Box::new(Expr::Number(5f64)) } }], res);
     }
 
     #[test]
