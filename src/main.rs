@@ -5,6 +5,7 @@ use std::{io::Write, path::PathBuf};
 
 mod lexer;
 mod parser;
+mod resolver;
 mod compiler;
 mod utils;
 
@@ -66,7 +67,7 @@ fn main() {
 
     let llvm_info = match compiler.compile() {
         Ok(module) => module,
-        Err(err) => {
+        Err(ref err) => {
             println!("Error: compiling function: {}", err);
             return
         }

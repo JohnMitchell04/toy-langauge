@@ -42,7 +42,7 @@ impl<'ctx> Compiler<'ctx> {
         for stmt in &self.top_level {
             match stmt {
                 Stmt::Function { ref prototype, ref body, is_anon: _ } => _ = Compiler::compile_fn(&mut self.llvm_info, prototype, body)?, // TODO: At some point we will need to collect these in a set of globals
-                _ => unimplemented!()
+                _ => unimplemented!(),
             }
         }
 
@@ -55,7 +55,7 @@ impl<'ctx> Compiler<'ctx> {
         // TODO: Maybe deal with this better, altho this error should never occur and cannot be recovered from at this stage
         trace!("Compiling function");
         let (name, args) = match prototype {
-            Stmt::Prototype { name, args, is_op: _, prec: _ } => (name, args),
+            Stmt::Prototype { name, args } => (name, args),
             _ => panic!("FATAL: Attempting to compile invalid function statement, this indicates the parser has failed catasrophically"),
         };
 
@@ -229,7 +229,7 @@ impl<'ctx> Compiler<'ctx> {
         trace!("Conpiling for statement");
         let context = llvm_info.context;
 
-        // Compile the starting experssion
+        // Compile the starting expression
         let start_alloca = Compiler::create_entry_block_alloca(context, parent, var_name);
         let start = Compiler::compile_expr(llvm_info, parent, variables, start)?;
         llvm_info.builder.build_store(start_alloca, start).unwrap();
@@ -350,6 +350,7 @@ impl<'ctx> Compiler<'ctx> {
                 }
             },
             Expr::Null => Ok(llvm_info.context.f64_type().const_float(0f64)),
+            _ => unimplemented!()
         }
     }
 

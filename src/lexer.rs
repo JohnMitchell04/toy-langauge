@@ -9,7 +9,7 @@ pub enum Token {
     Comma, Semicolon, LParen, RParen, LBrace, RBrace,
 
     // Keywords
-    Fun, Extern, For, If, Else, Unary, Binary, Var,
+    Fun, Extern, For, If, Else, Unary, Binary, Var, Global,
 
     // User data
     Comment, Ident(String), Number(f64), Op(char),
@@ -43,6 +43,7 @@ impl Display for Token {
             Self::Unary => write!(f, "unary"),
             Self::Binary => write!(f, "binary"),
             Self::Var => write!(f, "var"),
+            Self::Global => write!(f, "global"),
             Self::Comment => write!(f, "Comment"),
             Self::Ident(ident) => write!(f, "Identifier: {}", ident),
             Self::Number(num) => write!(f, "Number: {}", &num.to_string()),
@@ -165,6 +166,7 @@ impl<'a> Lexer<'a> {
             "unary" => Ok(Token::Unary),
             "binary" => Ok(Token::Binary),
             "var" => Ok(Token::Var),
+            "global" => Ok(Token::Global),
             ident => Ok(Token::Ident(ident.to_string())),
         }
     }
@@ -241,7 +243,7 @@ impl<'a> Lexer<'a> {
     fn trace_result(&self, result: &LexResult) {
         match result {
             Ok(token) => trace!("{}", token),
-            Err(err) => trace!("{}", err)
+            Err(ref err) => trace!("{}", err)
         }
     }
 }
