@@ -1,8 +1,10 @@
 use std::{error::Error, fmt::Display, iter::Peekable, ops::DerefMut, str::Chars};
-
 use crate::trace;
 
+// TODO: Document this module better
+
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::upper_case_acronyms)]
 // TODO: At some point change tokens to hold references to the source code, this will require an extensive lifetimes rework however
 pub enum Token {
     // Single character tokens

@@ -1,7 +1,8 @@
 use std::{fmt::Display, iter::Peekable};
 use itertools::Itertools;
-
 use crate::{lexer::{LexResult, Lexer, Token}, trace};
+
+// TODO: Document this module better
 
 macro_rules! match_no_error {
     ($self:ident, $token:pat, $str:tt) => {
@@ -51,8 +52,8 @@ macro_rules! err_add_shorthand {
     };
 }
 
-#[derive(Debug, Clone, PartialEq)]
 /// Some code that resolves to a value.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Binary {
         op: char,
@@ -96,8 +97,8 @@ impl Display for Expr {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
 /// Generally some piece of code that does something.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     Conditional {
         cond: Expr,
@@ -156,7 +157,7 @@ impl<'a> Parser<'a> {
         Parser { lexer, errors: Vec::new() }
     }
 
-    // TODO: Maybe return an Rc<[Stmt]> and Rc<[String]>/Rc<[Str]> as we only need the data to be readable
+    // TODO: Maybe return an Rc<&[Stmt]> and Rc<&[String]>/Rc<&[Str]> as we only need the data to be readable
     /// Parse the given input, will return a vector of top level [`Stmt`].
     /// 
     /// **Start** ::= <[Function](Self::parse_function)>

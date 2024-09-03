@@ -2,27 +2,70 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use inkwell::values::PointerValue;
 use crate::{parser::{Expr, Stmt}, trace};
 
-#[derive(Clone)]
 // TOOD: Add type info
-/// Variable type that holds information about a scopes location in logical scope and its LLVM [PointerValue].
+/// Variable type that holds information about a variables location in logical scope and its LLVM [PointerValue].
 /// 
 /// A `scope_location` value of [None] indicates the variable is defined in the local scope, otherwise it points to the scope where the variable is declared.
 /// 
-/// The `pointer_value` is not filled in the resolver but the compiler adds this information to point to the LLVM value when producing IR.
+/// The `pointer_value` is not filled in by the resolver but the compiler adds this information to point to the LLVM value when producing IR.
+#[derive(Clone)]
 pub struct Variable<'a> {
     scope_location: Option<Rc<RefCell<Scope<'a>>>>,
     pointer_value: Option<PointerValue<'a>>
 }
 
-/// A scope in the program, containing information about variables declared within it and a parent scope if one exists
+/// A scope in the program, containing information about variables declared within it and a parent scope if one exists.
 pub struct Scope<'a> {
-    pub variables: HashMap<String, Variable<'a>>,
-    pub parent: Option<Rc<RefCell<Scope<'a>>>>,
+    variables: HashMap<String, Variable<'a>>,
+    parent: Option<Rc<RefCell<Scope<'a>>>>,
 }
 
 impl<'a> Scope<'a> {
+    /// Create a new scope with no variables and no parent.
     pub fn new() -> Self {
         Scope { variables: HashMap::new(), parent: None }
+    }
+
+    /// Get the scope's parent.
+    ///
+    /// **Returns:**
+    /// 
+    /// The parent if the scope has one, [None] otherwise
+    pub fn get_parent(&self) -> Option<Rc<RefCell<Scope<'a>>>> {
+        self.parent.clone()
+    }
+
+    /// Set the scope's parent.
+    /// 
+    /// **Arguments:**
+    /// - `parent` - A reference to the parent.
+    pub fn set_parent(&mut self, parent: Rc<RefCell<Scope<'a>>>) {
+        self.parent = Some(parent)
+    }
+
+    /// Get some variable in the scope.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the variable to retrieve.
+    /// 
+    /// **Returns:**
+    /// 
+    /// [`None`] if the variable is not present in the scope, otherwise an [`Variable`].
+    pub fn get_variable(&self, name: &str) -> Option<&Variable<'a>> {
+        self.variables.get(name)
+    }
+
+    /// Set a variable in the scope.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the variable to set.
+    /// - `variable` - The [`Variable`] to set.
+    /// 
+    /// **Returns:**
+    /// 
+    /// [None] if the variable is not already present, otherwise the [`Variable`] that was set before.
+    pub fn set_variable(&mut self, name: String, variable: Variable<'a>) -> Option<Variable<'a>> {
+        self.variables.insert(name, variable)
     }
 }
 
@@ -55,62 +98,132 @@ pub struct Function<'a> {
     scope: Rc<RefCell<Scope<'a>>>,
 }
 
-/// Resolve the provided top level [`Stmt`], and retrieve the globals, top level [`Statement`] and [`Function`].
+///The global scope of the program, contains the top level statements and global variables.
+pub struct Globals<'a> {
+    stmts: Vec<Stmt>,
+    scope: Rc<RefCell<Scope<'a>>>,
+}
+
+impl<'a> Globals<'a> {
+    /// Create a new global scope.
+    pub fn new() -> Self {
+        Globals { stmts: Vec::new(), scope: Rc::from(RefCell::from(Scope::new())) }
+    }
+
+    /// Set statements in a global scope.
+    /// 
+    /// **Arguments:**
+    /// - `stmts` - The top level statements to add to the global. 
+    pub fn set_top_level(&mut self, stmts: Vec<Stmt>) {
+        self.stmts = stmts
+    }
+
+    /// Get some global.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the global to retrieve.
+    /// 
+    /// **Returns:**
+    /// 
+    /// [`None`] if the global is not present, otherwise an [`Variable`].
+    pub fn get_global(&self, name: &str) -> Option<Variable<'a>> {
+        self.scope.borrow().get_variable(name).cloned()
+    }
+
+    /// Set a global.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the global to set.
+    /// - `variable` - The [`Variable`] to set.
+    /// 
+    /// **Returns:**
+    /// 
+    /// [None] if the global is not already present, otherwise the [`Variable`] that was set before.
+    pub fn set_global(&mut self, name: String, variable: Variable<'a>) -> Option<Variable<'a>> {
+        self.scope.borrow_mut().set_variable(name, variable)
+    }
+}
+
+/// Contains all state for resolving a file.
+struct ResolverState<'a> {
+    functions: HashMap<String, Function<'a>>,
+    globals: Globals<'a>,
+    errors: Vec<String>,
+}
+
+/// Resolve the provided top level [`Stmt`], and retrieve the globals and functions.
 /// 
 /// **Arguments:**
 /// - `top_level` - The top level [`Stmt`] provided by the parser.
 /// 
 /// **Returns:**
-/// A tuple containing the globals, top level statements and functions in that order.
-pub fn resolve<'a>(top_level: Vec<Stmt>) -> Result<(Rc<RefCell<Scope<'a>>>, Vec<Stmt>, HashMap<String, Function<'a>>), Vec<String>> {
-    trace!("Resolving program");
-    let mut globals = Scope::new();
-    let mut functions = HashMap::new();
-    let mut errors = Vec::new();
-
+/// 
+/// A tuple containing the globals, functions.
+pub fn resolve<'a>(top_level: Vec<Stmt>) -> Result<(Globals<'a>, HashMap<String, Function<'a>>), Vec<String>> {
+    trace!("Resolving top level");
+    let mut state = ResolverState { functions: HashMap::new(), globals: Globals::new(), errors: Vec::new() };
     let (function_definitions, top_level_stmts): (Vec<Stmt>, Vec<Stmt>) = top_level.into_iter().partition(|stmt| matches!(stmt, Stmt::Function { .. }));
 
-    let top_level = top_level_stmts.clone();
-
     // Ensure we resolve globals first 
-    for stmt in top_level_stmts.into_iter() {
+    for stmt in top_level_stmts.iter() {
         match stmt {
-            Stmt::Expression { expr } => resolve_top_expr(&mut globals, expr, &mut errors),
+            Stmt::Expression { expr } => resolve_top_expr(&mut state, expr),
             _ => panic!("FATAL: Attempting to compile invalid top-level statement, this indicates the parser has failed catasrophically"),
         }
     }
-    let globals = Rc::from(RefCell::from(globals));
+    state.globals.set_top_level(top_level_stmts);
 
     // Resolve functions
     for stmt in function_definitions.into_iter() {
         match stmt {
-            Stmt::Function { .. } => resolve_function(&mut functions, globals.clone(), stmt, &mut errors),
+            Stmt::Function { .. } => resolve_function(&mut state, stmt),
             _ => panic!("FATAL: Attempting to resolve non function as a function, this indicates the parser has failed catasrophically"),
         }
     }
 
-    if errors.is_empty() {
-        Ok((globals, top_level, functions))
+    if state.errors.is_empty() {
+        Ok((state.globals, state.functions))
     } else {
-        Err(errors)
+        Err(state.errors)
     }
 }
 
-/// Resolve some top level global declaration expression and add to globals scope.
-fn resolve_top_expr(globals: &mut Scope, expr: Expr, errors: &mut Vec<String>) {
+/// Add global declarations to global scope and ensure they are not redefined.
+/// 
+/// **Arguments:**
+/// - `state` - The current [ResolverState].
+/// - `expr` - The top level expression to evaluate.
+/// 
+/// **Panics:**
+/// 
+/// When the resolver tries to resolve a top level statement that is not a variable declaration, this should never happen as long as the parser works correctly.
+fn resolve_top_expr(state: &mut ResolverState, expr: &Expr) {
     trace!("Resolving top-level expression");
     match expr {
         Expr::VarDeclar { variable, body: _ } => {
-            if globals.variables.get(&variable).is_some() { errors.push(format!("Global: {} is already defined", variable)); return; }
+            if state.globals.get_global(variable).is_some() {
+                state.errors.push(format!("Global: {} is already defined", variable));
+                return;
+            }
+
             let variable_val = Variable { scope_location: None, pointer_value: None};
-            globals.variables.insert(variable, variable_val);
+            state.globals.set_global(variable.to_string(), variable_val);
         },
         _ => panic!("FATAL: Attempting to resolve invalid top-level statement, this indicates the parser has failed catasrophically")
     }
 }
 
-/// Resolve some function and add to map of functions.
-fn resolve_function<'a>(functions: &mut HashMap<String, Function<'a>>, globals: Rc<RefCell<Scope<'a>>>, function: Stmt, errors: &mut Vec<String>) {
+
+/// Resolve function declarations and add to map of functions.
+/// 
+/// **Arguments:**
+/// - `state` - The current [ResolverState].
+/// - `expr` - The function expression to evaluate.
+/// 
+/// **Panics:**
+/// 
+/// When the resolver tries to resolve a top level statement that is not a function declaration, this should never happen as long as the parser works correctly.
+fn resolve_function(state: &mut ResolverState, function: Stmt) {
     trace!("Resolving function");
     let (prototype, body) = match function {
         Stmt::Function { prototype, body, is_anon: _ } => (*prototype, body),
@@ -124,11 +237,12 @@ fn resolve_function<'a>(functions: &mut HashMap<String, Function<'a>>, globals: 
 
     // Add function arguments to a scope
     let mut args_scope = Scope::new();
-    args_scope.parent = Some(globals);
+    args_scope.parent = Some(state.globals.scope.clone());
+
     for arg in args {
         let variable = Variable { scope_location: None, pointer_value: None };
-        if let Some(_) = args_scope.variables.insert(arg.clone(), variable) {
-            errors.push("Duplicate argument: ".to_string() + &arg);
+        if args_scope.set_variable(arg.clone(), variable).is_some() {
+            state.errors.push("Duplicate argument: ".to_string() + &arg);
         }
     }
     let args = Rc::from(RefCell::from(args_scope));
@@ -140,14 +254,23 @@ fn resolve_function<'a>(functions: &mut HashMap<String, Function<'a>>, globals: 
 
     let mut resolved_body = Vec::new();
     for stmt in body {
-        resolved_body.push(resolve_stmt(scope.clone(), stmt, errors));
+        resolved_body.push(resolve_stmt(scope.clone(), stmt, &mut state.errors));
     }
 
     let function = Function { name: name.clone(), args, body: resolved_body, scope };
-    functions.insert(name, function);
+    state.functions.insert(name, function);
 }
 
 /// Resolve a statement.
+/// 
+/// **Arguments:**
+/// - `scope` - The scope the statement is in.
+/// - `stmt` - The statement to resolve.
+/// - `errors` - Vector of errors to add to.
+/// 
+/// **Resturns:**
+/// 
+/// The resolved statement.
 fn resolve_stmt<'a>(scope: Rc<RefCell<Scope<'a>>>, stmt: Stmt, errors: &mut Vec<String>) -> Statement<'a> {
     trace!("Resolving statement");
     match stmt {
@@ -199,16 +322,21 @@ fn resolve_stmt<'a>(scope: Rc<RefCell<Scope<'a>>>, stmt: Stmt, errors: &mut Vec<
 }
 
 /// Resolve an expression.
+/// 
+/// **Arguments:**
+/// - `scope` - The scope the expression is in.
+/// - `expr` - The expression to resolve.
+/// - `errors` - Vector of errors to add to.
 fn resolve_expr(scope: Rc<RefCell<Scope>>, expr: &Expr, errors: &mut Vec<String>) {
     trace!("Resolving expression");
     match expr {
         Expr::VarDeclar { variable, body } => {
             resolve_expr(scope.clone(), body, errors);
             let variable_val = Variable { scope_location: None, pointer_value: None };
-            scope.borrow_mut().variables.insert(variable.to_string(), variable_val);
+            scope.borrow_mut().set_variable(variable.to_string(), variable_val);
         },
         Expr::VarAssign { variable, body } => {
-            check_variable(scope.clone(), variable, errors);
+            resolve_variable(scope.clone(), variable, errors);
             resolve_expr(scope, body, errors);
         },
         Expr::Binary { op: _, left, right } => {
@@ -218,46 +346,51 @@ fn resolve_expr(scope: Rc<RefCell<Scope>>, expr: &Expr, errors: &mut Vec<String>
         Expr::Unary { op: _, right } => resolve_expr(scope, right, errors),
         Expr::Call { fn_name: _, args } => for arg in args { resolve_expr(scope.clone(), arg, errors) },
         Expr::Number(_) => {},
-        Expr::Variable(name) => check_variable(scope, name, errors),
+        Expr::Variable(name) => resolve_variable(scope, name, errors),
         Expr::Null => panic!("FATAL: Attempting to resolve null expression, this indicates the parser has failed catasrophically")
     }
 }
 
-/// Ensure the variable has been declared somewhere
-fn check_variable(scope: Rc<RefCell<Scope>>, name: &String, errors: &mut Vec<String>) {
+/// Ensure the variable has been declared somewhere and point the variables scope to that location.
+/// 
+/// **Arguments:**
+/// - `scope` - The scope the variable is in.
+/// - `name` - The name of the variable.
+/// - `errors` - Vector of errors to add to.
+fn resolve_variable(scope: Rc<RefCell<Scope>>, name: &String, errors: &mut Vec<String>) {
     trace!("Checking variable: {}", name);
 
     // If the variable has been declared already in the local scope, nothing needs to be done
-    if scope.borrow_mut().variables.get(name).is_some() { return; }
+    if scope.borrow_mut().get_variable(name).is_some() { return; }
 
     // Move up scopes, looking for the variable
-    let mut cur_scope = scope.borrow().parent.clone();
-    while cur_scope.is_some() {
-        if let Some(up_scope) = cur_scope.clone().unwrap().borrow_mut().variables.get(name) {
+    let mut higher_scope = scope.borrow().get_parent();
+    while let Some(cur_scope) = higher_scope {
+        if let Some(up_scope) = cur_scope.borrow().get_variable(name) {
             if up_scope.scope_location.is_some() {
                 scope.borrow_mut().variables.insert(name.to_string(), up_scope.clone());
             } else {
-                let variable = Variable { scope_location: cur_scope.clone(), pointer_value: None };
+                let variable = Variable { scope_location: Some(cur_scope.clone()), pointer_value: None };
                 scope.borrow_mut().variables.insert(name.to_string(), variable);
             }
 
             return;
         }
 
-        cur_scope = cur_scope.unwrap().borrow().parent.clone();
+        higher_scope = cur_scope.borrow().parent.clone();
     }
 
     // The variable was not found anywhere
-    errors.push("Could not find variable: ".to_string() + &name)
+    errors.push("Could not find variable: ".to_string() + name)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::HashMap, rc::Rc};
-    use crate::{parser::{self, Stmt}, resolver::Statement};
-    use super::{resolve, Function, Scope};
+    use std::collections::HashMap;
+    use crate::{parser, resolver::Statement};
+    use super::{resolve, Function, Globals};
 
-    fn run<'a>(input: &str) -> (Rc<RefCell<Scope<'a>>>, Vec<Stmt>, HashMap<String, Function<'a>>) {
+    fn run<'a>(input: &str) -> (Globals<'a>, HashMap<String, Function<'a>>) {
         let stmts = parser::Parser::new(input).parse().unwrap();
         resolve(stmts).unwrap()
     }
@@ -269,21 +402,21 @@ mod tests {
 
     #[test]
     fn global_defintion() {
-        let (globals, _, _) = run("global var x = 5;");
-        assert!(globals.borrow().variables.get("x").is_some())
+        let (globals, _) = run("global var x = 5;");
+        assert!(globals.get_global("x").is_some())
     }
 
     #[test]
     fn use_global_definition() {
-        let (_, _, functions) = run("global var x = 5; fun test() { x; }");
+        let (_, functions) = run("global var x = 5; fun test() { x; }");
         let function = functions.get("test").unwrap();
-        assert!(function.scope.borrow().variables.get("x").is_some())
+        assert!(function.scope.borrow().variables.contains_key("x"))
     }
 
     #[test]
     fn function_definition() {
-        let (_, _, functions) = run("fun test() {}");
-        assert!(functions.get("test").is_some())
+        let (_, functions) = run("fun test() {}");
+        assert!(functions.contains_key("test"))
     }
 
     #[test]
@@ -306,9 +439,9 @@ mod tests {
 
     #[test]
     fn variable_use_after_declar() {
-        let (_, _, functions) = run("fun test() { var x = 1; x; }");
+        let (_, functions) = run("fun test() { var x = 1; x; }");
         let function = functions.get("test").unwrap();
-        assert!(function.scope.borrow().variables.get("x").is_some())
+        assert!(function.scope.borrow().variables.contains_key("x"))
     }
 
     #[test]
@@ -324,9 +457,9 @@ mod tests {
 
     #[test]
     fn arg() {
-        let (_, _, functions) = run("fun test(x) {}");
+        let (_, functions) = run("fun test(x) {}");
         let function = functions.get("test").unwrap();
-        assert!(function.args.borrow().variables.get("x").is_some())
+        assert!(function.args.borrow().variables.contains_key("x"))
     }
 
     #[test]
@@ -337,33 +470,33 @@ mod tests {
 
     #[test]
     fn if_statement() {
-        let (_, _, functions) = run("fun test() { var y = 1; if (y) { var x = y + 1; x; }}");
+        let (_, functions) = run("fun test() { var y = 1; if (y) { var x = y + 1; x; }}");
         let function = functions.get("test").unwrap();
-        assert!(function.scope.borrow().variables.get("y").is_some());
+        assert!(function.scope.borrow().variables.contains_key("y"));
 
         let conditional = function.body.last().unwrap();
         assert!(matches!(conditional, Statement::Conditional { cond: _, then: _, otherwise: _, then_scope: _, otherwise_scope: _ }));
 
         if let Statement::Conditional { cond: _, then: _, otherwise: _, then_scope, otherwise_scope } = conditional {
-            assert!(then_scope.borrow().variables.get("x").is_some());
-            assert!(then_scope.borrow().variables.get("y").is_some());
+            assert!(then_scope.borrow().variables.contains_key("x"));
+            assert!(then_scope.borrow().variables.contains_key("y"));
             assert!(otherwise_scope.borrow().variables.is_empty());
         }
     }
 
     #[test]
     fn for_statement() {
-        let (_, _, functions) = run("fun test() { var y = 1; for (var x = y + 1; x < 3; x = x + 1) { var z = 2; z; } }");
+        let (_, functions) = run("fun test() { var y = 1; for (var x = y + 1; x < 3; x = x + 1) { var z = 2; z; } }");
         let function = functions.get("test").unwrap();
-        assert!(function.scope.borrow().variables.get("y").is_some());
+        assert!(function.scope.borrow().variables.contains_key("y"));
 
         let for_statement = function.body.last().unwrap();
         assert!(matches!(for_statement, Statement::For { start: _, condition: _, step: _, body: _, scope: _ }));
 
         if let Statement::For { start: _, condition: _, step: _, body: _, scope } = for_statement {
-            assert!(scope.borrow().variables.get("y").is_some());
-            assert!(scope.borrow().variables.get("x").is_some());
-            assert!(scope.borrow().variables.get("z").is_some());
+            assert!(scope.borrow().variables.contains_key("y"));
+            assert!(scope.borrow().variables.contains_key("x"));
+            assert!(scope.borrow().variables.contains_key("z"));
         }
     }
 
