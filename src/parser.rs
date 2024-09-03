@@ -105,7 +105,6 @@ pub enum Stmt {
         otherwise: Vec<Stmt>,
     },
     For {
-        var_name: String,
         start: Expr,
         condition: Expr,
         step: Expr,
@@ -130,7 +129,7 @@ impl Display for Stmt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Conditional { cond, then, otherwise } => write!(f, "If: {} then: {}\nelse: {}", cond, then.iter().join(",\n"), otherwise.iter().join(",\n")),
-            Self::For { var_name, start, condition, step, body } => write!(f, "For: {} = {}; {}; {}:\n{}", var_name, start, condition, step, body.iter().join(",\n")),
+            Self::For { start, condition, step, body } => write!(f, "For: {}; {}; {}:\n{}", start, condition, step, body.iter().join(",\n")),
             Self::Prototype { name, args } => write!(f, "<fn({}) {}>", args.iter().join(","), name),
             Self::Function { prototype, body, is_anon: _ } => {
                 let body = if !body.is_empty() { body.iter().join(",\n") } else { "none".to_string() };
@@ -378,26 +377,20 @@ impl<'a> Parser<'a> {
     }
 
     // TODO: Make fields optional
+    // TODO: Allow the user to use any expression as an initialiser so they can declare a variable or do something to another variable
     /// Parse a for expression.
     /// 
-    /// **For** ::= 'for' '(' <[Ident](Token::Ident)> '=' <[Expression](Self::parse_expr)> ';' <[Expression](Self::parse_expr)> ';' <[Expression](Self::parse_expr)> ')' '{' <[Body](Self::parse_body)> '}'
+    /// **For** ::= 'for' '(' <[Var](Self::parse_var_stmt)> ';' <[Expression](Self::parse_expr)> ';' <[Expression](Self::parse_expr)> ')' '{' <[Body](Self::parse_body)> '}'
     fn parse_for_stmt(&mut self) -> Stmt {
         trace!("Parsing for expression");
         _ = self.next();
 
-        match_no_error!(self, Token::LBrace, "Expected '(' after for");
+        match_no_error!(self, Token::LParen, "Expected '(' after for");
 
-        let var_name = match self.peek() {
-            Ok(Token::Ident(_)) => self.next().unwrap().take_name(),
-            Ok(_) => { self.errors.push(String::from("Expected start identifier")); "".to_string() },
-            Err(ref err) => { err_add_shorthand!(err, self); "".to_string() },
+        let start = match self.parse_var_stmt() {
+            Stmt::Expression { expr } => expr,
+            _ => panic!("FATAL: This should never happend due to how var statement parsing works"),
         };
-
-        match_no_error!(self, Token::Op('='), "Expected '=' after identifier");
-
-        let start = self.parse_expr();
-
-        match_no_error!(self, Token::Semicolon, "Expected ';' after initialiser");
 
         let condition = self.parse_expr();
 
@@ -409,7 +402,7 @@ impl<'a> Parser<'a> {
         
         let body = self.parse_body();
 
-        Stmt::For { var_name, start, condition, step, body }
+        Stmt::For { start, condition, step, body }
     }
 
     // TODO: Allow multiple assignments and definitions without assignment
@@ -724,6 +717,25 @@ mod tests {
     }
 
     #[test]
+    fn for_statement() {
+        let res = parse_no_error("fun test() { for (var x = 0; x < 1; x = x + 1) { } }");
+        assert_eq!(
+            create_function(vec![], vec![
+                Stmt::For { 
+                    start: Expr::VarDeclar { variable: "x".to_string(), body: Box::new(Expr::Number(0f64)) },
+                    condition: Expr::Binary { op: '<', left: Box::new(Expr::Variable("x".to_string())), right: Box::new(Expr::Number(1f64)) },
+                    step: Expr::VarAssign {
+                        variable: "x".to_string(),
+                        body: Box::new(Expr::Binary { op: '+', left: Box::new(Expr::Variable("x".to_string())), right: Box::new(Expr::Number(1f64)) })
+                    },
+                    body: vec![]
+                }
+            ]),
+            res[0]
+        )
+    }
+
+    #[test]
     fn assignment() {
         let res = parse_no_error("fun test() { x = 1; }");
         assert_eq!(
@@ -956,7 +968,7 @@ mod tests {
         assert_eq!(vec!["Invalid identifier: b!"], output)
     }
 
-    // TODO: Add tests for for statements
+    // TODO: Add failure tests for for statements
 
     #[test]
     fn invalid_expr_keyword() {

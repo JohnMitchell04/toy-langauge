@@ -130,7 +130,7 @@ impl<'ctx> Compiler<'ctx> {
         trace!("Compiling statemement");
         match stmt {
             Stmt::Conditional { ref cond, ref then, ref otherwise } => { Compiler::compile_conditional(llvm_info, parent, variables, cond, then, otherwise)?; },
-            Stmt::For { ref var_name, ref start, ref condition, ref step, ref body } => { Compiler::compile_for(llvm_info, parent, variables, var_name, start, condition, step, body)?; },
+            Stmt::For { ref start, ref condition, ref step, ref body } => { Compiler::compile_for(llvm_info, parent, variables, start, condition, step, body)?; },
             Stmt::Expression { expr } => { Compiler::compile_expr(llvm_info, parent, variables, expr)?; },
             _ => panic!("FATAL: Attempting to compile invalid statement, this indicates the parser has failed catasrophically")
         }
@@ -220,7 +220,6 @@ impl<'ctx> Compiler<'ctx> {
         llvm_info: &mut LLVMInfo<'ctx>,
         parent: FunctionValue, 
         variables: &mut HashMap<String, PointerValue<'ctx>>, 
-        var_name: &str, 
         start: &Expr, 
         condition: &Expr, 
         step: &Expr, 
@@ -229,14 +228,16 @@ impl<'ctx> Compiler<'ctx> {
         trace!("Conpiling for statement");
         let context = llvm_info.context;
 
-        // Compile the starting expression
-        let start_alloca = Compiler::create_entry_block_alloca(context, parent, var_name);
-        let start = Compiler::compile_expr(llvm_info, parent, variables, start)?;
-        llvm_info.builder.build_store(start_alloca, start).unwrap();
+        // Temporarily disable and thus break for statements whilst we work on the resolver
 
-        // Deal with variable shadowing
-        let old_val = variables.remove(var_name);
-        variables.insert(var_name.to_owned(), start_alloca);
+        // Compile the starting expression
+        // let start_alloca = Compiler::create_entry_block_alloca(context, parent, var_name);
+        // let start = Compiler::compile_expr(llvm_info, parent, variables, start)?;
+        // llvm_info.builder.build_store(start_alloca, start).unwrap();
+
+        // // Deal with variable shadowing
+        // let old_val = variables.remove(var_name);
+        // variables.insert(var_name.to_owned(), start_alloca);
 
         let loop_bb = context.append_basic_block(parent, "loop");
 
@@ -253,10 +254,10 @@ impl<'ctx> Compiler<'ctx> {
         let end_cond = Compiler::compile_expr(llvm_info, parent, variables, condition)?;
 
         // TODO: Will need to re-do this when types are implemented
-        let curr_var = Compiler::build_load(llvm_info, start_alloca, var_name);
-        let next_var = llvm_info.builder.build_float_add(curr_var.into_float_value(), step, "nextvar").unwrap();
+        // let curr_var = Compiler::build_load(llvm_info, start_alloca, var_name);
+        // let next_var = llvm_info.builder.build_float_add(curr_var.into_float_value(), step, "nextvar").unwrap();
 
-        llvm_info.builder.build_store(start_alloca, next_var).unwrap();
+        // llvm_info.builder.build_store(start_alloca, next_var).unwrap();
 
         let end_cond = llvm_info.builder
             .build_float_compare(inkwell::FloatPredicate::ONE, end_cond, context.f64_type().const_float(0.0),"loopcond")
@@ -267,8 +268,8 @@ impl<'ctx> Compiler<'ctx> {
         llvm_info.builder.position_at_end(after_bb);
 
         // Deal with variable shadowing
-        variables.remove(var_name);
-        if let Some(val) = old_val { variables.insert(var_name.to_owned(), val); }
+        // variables.remove(var_name);
+        // if let Some(val) = old_val { variables.insert(var_name.to_owned(), val); }
 
         Ok(())
     }

@@ -36,7 +36,6 @@ pub enum Statement<'a> {
         otherwise_scope: Rc<RefCell<Scope<'a>>>,
     },
     For {
-        var_name: String,
         start: Expr,
         condition: Expr,
         step: Expr,
@@ -149,35 +148,39 @@ fn resolve_function<'a>(functions: &mut HashMap<String, Function<'a>>, globals: 
 }
 
 /// Resolve a statement.
-fn resolve_stmt<'a>(scope: Rc<RefCell<Scope>>, stmt: Stmt, errors: &mut Vec<String>) -> Statement<'a> {
+fn resolve_stmt<'a>(scope: Rc<RefCell<Scope<'a>>>, stmt: Stmt, errors: &mut Vec<String>) -> Statement<'a> {
     trace!("Resolving statement");
     match stmt {
         Stmt::Expression { expr } => {
             resolve_expr(scope, &expr, errors);
             Statement::Expression { expr }
         },
-        Stmt::For { var_name, start, condition, step, body } => {
-            let mut scope = Scope::new();
-            let variable = Variable { scope_location: None, pointer_value: None };
-            scope.variables.insert(var_name.clone(), variable);
-            let scope = Rc::from(RefCell::from(scope));
+        Stmt::For { start, condition, step, body } => {
+            let mut for_scope = Scope::new();
+            for_scope.parent = Some(scope);
+            let for_scope = Rc::from(RefCell::from(for_scope));
 
-            resolve_expr(scope.clone(), &start, errors);
-            resolve_expr(scope.clone(), &condition, errors);
-            resolve_expr(scope.clone(), &step, errors);
+            resolve_expr(for_scope.clone(), &start, errors);
+            resolve_expr(for_scope.clone(), &condition, errors);
+            resolve_expr(for_scope.clone(), &step, errors);
 
             let mut resolved_body = Vec::new();
             for stmt in body {
-                resolved_body.push(resolve_stmt(scope.clone(), stmt, errors))
+                resolved_body.push(resolve_stmt(for_scope.clone(), stmt, errors))
             }
 
-            Statement::For { var_name, start, condition, step, body: resolved_body, scope }
+            Statement::For { start, condition, step, body: resolved_body, scope: for_scope }
         },
         Stmt::Conditional { cond, then, otherwise } => {
-            resolve_expr(scope, &cond, errors);
+            resolve_expr(scope.clone(), &cond, errors);
 
-            let then_scope = Rc::from(RefCell::from(Scope::new()));
-            let otherwise_scope = Rc::from(RefCell::from(Scope::new()));
+            let mut then_scope = Scope::new();
+            then_scope.parent = Some(scope.clone());
+            let then_scope = Rc::from(RefCell::from(then_scope));
+
+            let mut otherwise_scope = Scope::new();
+            otherwise_scope.parent = Some(scope);
+            let otherwise_scope = Rc::from(RefCell::from(otherwise_scope));
 
             let mut resolved_then = Vec::new();
             for stmt in then {
@@ -251,7 +254,7 @@ fn check_variable(scope: Rc<RefCell<Scope>>, name: &String, errors: &mut Vec<Str
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, collections::HashMap, rc::Rc};
-    use crate::parser::{self, Stmt};
+    use crate::{parser::{self, Stmt}, resolver::Statement};
     use super::{resolve, Function, Scope};
 
     fn run<'a>(input: &str) -> (Rc<RefCell<Scope<'a>>>, Vec<Stmt>, HashMap<String, Function<'a>>) {
@@ -332,7 +335,37 @@ mod tests {
         assert_eq!(vec!["Duplicate argument: x"], err)
     }
 
-    // TODO: Test nested
+    #[test]
+    fn if_statement() {
+        let (_, _, functions) = run("fun test() { var y = 1; if (y) { var x = y + 1; x; }}");
+        let function = functions.get("test").unwrap();
+        assert!(function.scope.borrow().variables.get("y").is_some());
+
+        let conditional = function.body.last().unwrap();
+        assert!(matches!(conditional, Statement::Conditional { cond: _, then: _, otherwise: _, then_scope: _, otherwise_scope: _ }));
+
+        if let Statement::Conditional { cond: _, then: _, otherwise: _, then_scope, otherwise_scope } = conditional {
+            assert!(then_scope.borrow().variables.get("x").is_some());
+            assert!(then_scope.borrow().variables.get("y").is_some());
+            assert!(otherwise_scope.borrow().variables.is_empty());
+        }
+    }
+
+    #[test]
+    fn for_statement() {
+        let (_, _, functions) = run("fun test() { var y = 1; for (var x = y + 1; x < 3; x = x + 1) { var z = 2; z; } }");
+        let function = functions.get("test").unwrap();
+        assert!(function.scope.borrow().variables.get("y").is_some());
+
+        let for_statement = function.body.last().unwrap();
+        assert!(matches!(for_statement, Statement::For { start: _, condition: _, step: _, body: _, scope: _ }));
+
+        if let Statement::For { start: _, condition: _, step: _, body: _, scope } = for_statement {
+            assert!(scope.borrow().variables.get("y").is_some());
+            assert!(scope.borrow().variables.get("x").is_some());
+            assert!(scope.borrow().variables.get("z").is_some());
+        }
+    }
 
     // TODO: When nested bodies are added, test them
 }
