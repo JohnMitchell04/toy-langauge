@@ -81,17 +81,16 @@ pub enum Expr {
     Null,
 }
 
-// TODO: Improve display
 impl Display for Expr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Binary { op, left, right } => write!(f, "Binary: {} {} {}", left.as_ref(), op, right.as_ref()),
-            Self::Unary { op, right } => write!(f, "Unary: {} {}", op, right.as_ref()),
+            Self::Binary { op, left, right } => write!(f, "{} {} {}", left.as_ref(), op, right.as_ref()),
+            Self::Unary { op, right } => write!(f, "{} {}", op, right.as_ref()),
             Self::Call { fn_name, args } => write!(f, "Call: <fn({}) {}>", args.iter().join(","), fn_name),
-            Self::Number(num) => write!(f, "Number: {}", num),
-            Self::Variable(ident) => write!(f, "Variable: {}", ident),
-            Self::VarDeclar { variable, body } => write!(f, "Declaration: {} = {}", variable, body),
-            Self::VarAssign { variable, body } => write!(f, "Assignment: {} = {}", variable, body),
+            Self::Number(num) => write!(f, "{}", num),
+            Self::Variable(ident) => write!(f, "{}", ident),
+            Self::VarDeclar { variable, body } => write!(f, "{} = {}", variable, body),
+            Self::VarAssign { variable, body } => write!(f, "{} = {}", variable, body),
             Self::Null => write!(f, "NULL"),
         }
     }
@@ -125,16 +124,15 @@ pub enum Stmt {
     }
 }
 
-// TODO: Improve display
 impl Display for Stmt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conditional { cond, then, otherwise } => write!(f, "If: {} then: {}\nelse: {}", cond, then.iter().join(",\n"), otherwise.iter().join(",\n")),
-            Self::For { start, condition, step, body } => write!(f, "For: {}; {}; {}:\n{}", start, condition, step, body.iter().join(",\n")),
-            Self::Prototype { name, args } => write!(f, "<fn({}) {}>", args.iter().join(","), name),
+            Self::Conditional { cond, then, otherwise } => write!(f, "if ({}) {{{}}} else: {{{}}}", cond, then.iter().join(" "), otherwise.iter().join(" ")),
+            Self::For { start, condition, step, body } => write!(f, "for ({}; {}; {}) {{{}}}", start, condition, step, body.iter().join(" ")),
+            Self::Prototype { name, args } => write!(f, "<fn {}({})>", name, args.iter().join(",")),
             Self::Function { prototype, body, is_anon: _ } => {
-                let body = if !body.is_empty() { body.iter().join(",\n") } else { "none".to_string() };
-                write!(f, "{}:\n{}", prototype, body)
+                let body = if !body.is_empty() { body.iter().join(",") } else { "".to_string() };
+                write!(f, "{}: {{{}}}", prototype, body)
             },
             Self::Expression { expr } => write!(f, "{}", expr),
         }

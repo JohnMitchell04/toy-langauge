@@ -1,5 +1,4 @@
 use clap::Parser;
-use compiler::Compiler;
 use inkwell::context::Context;
 use std::{io::Write, path::PathBuf};
 
@@ -49,15 +48,15 @@ fn main() {
 
     if !args.source.exists() {
         println!("Error: source file: \"{}\", does not exist", args.source.to_string_lossy());
+        return;
     }
-
     let input = std::fs::read_to_string(args.source).expect("Error: Could not read file");
 
     let context = Context::create();
-    let compiler = match Compiler::new(&input, &context) {
-        Ok(compiler) => compiler,
+    let module = match compiler::compile(&input, &context) {
+        Ok(module) => module,
         Err(errors) => {
-            println!("Errors encountered when parsing source:");
+            println!("Errors encountered when compiling source:");
             for error in errors {
                 println!("{}", error)
             }
@@ -65,20 +64,15 @@ fn main() {
         }
     };
 
-    let llvm_info = match compiler.compile() {
-        Ok(module) => module,
-        Err(ref err) => {
-            println!("Error: compiling function: {}", err);
-            return
-        }
-    };
-
-    let output = llvm_info.module.print_to_string();
+    let output = module.print_to_string();
     if cfg!(debug_assertions) {
         println!("DEBUG: File compiled to IR: \n{}", output.to_string());
     }
 
     let mut path = if let Some(folder) = args.output_folder { folder } else { PathBuf::from("./") };
     if let Some(name) = args.name { path.push(name); path.push(".ll")  } else { path.push("out.ll") };
-    std::fs::write(path, output.to_string()).expect("Error: Could not write IR to file");
+    
+    if std::fs::write(path, output.to_string()).is_err() {
+        println!("Error: Could not write IR to file")
+    }
 }

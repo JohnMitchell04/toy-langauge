@@ -14,6 +14,18 @@ pub struct Variable<'ctx> {
     pointer_value: Option<PointerValue<'ctx>>
 }
 
+impl<'ctx> Variable<'ctx> {
+    /// Retrieve the variable's scope location.
+    pub fn get_scope_location(&self) -> Option<Rc<RefCell<Scope<'ctx>>>> {
+        self.scope_location.clone()
+    }
+
+    /// Retrieve the variable's pointer value.
+    pub fn get_pointer_value(&self) -> Option<PointerValue<'ctx>> {
+        self.pointer_value.clone()
+    }
+}
+
 /// A scope in the program, containing information about variables declared within it and a parent scope if one exists.
 pub struct Scope<'ctx> {
     variables: HashMap<String, Variable<'ctx>>,
@@ -259,7 +271,7 @@ impl<'ctx> Resolver<'ctx> {
     /// 
     /// When the resolver tries to resolve a top level statement that is not a variable declaration, this should never happen as long as the parser works correctly.
     fn resolve_top_expr(&mut self, expr: &Expr) {
-        trace!("Resolving top-level expression");
+        trace!("Resolving top-level expression: {}", expr);
         match expr {
             Expr::VarDeclar { variable, body } => {
                 // Ensure global is unqiue
@@ -280,12 +292,9 @@ impl<'ctx> Resolver<'ctx> {
 
     /// Ensure an expression within a global body contains only valid expressions and that any variables references are already declared.
     fn resolve_global_body(&mut self, expr: &Expr) {
-        trace!("Resolving global body");
+        trace!("Resolving global body: {}", expr);
         match expr {
-            Expr::VarAssign { variable, body } => {
-                if !self.globals.contains_global(&variable) { self.errors.push(format!("Variable: {} has not been defined", variable)) }
-                self.resolve_global_body(body)
-            },
+            Expr::VarAssign { variable: _, body: _ } => self.errors.push("Global body must be static".to_string()),
             Expr::Binary { op: _, left, right } => {
                 self.resolve_global_body(left);
                 self.resolve_global_body(right)
@@ -293,7 +302,7 @@ impl<'ctx> Resolver<'ctx> {
             Expr::Unary { op: _, right } => self.resolve_global_body(right),
             Expr::Call { fn_name: _, args: _ } => self.errors.push("Cannot initalise global with a function call".to_string()),
             Expr::Number(_) => {},
-            Expr::Variable(name) => if !self.globals.contains_global(name) { self.errors.push(format!("Variable: {} has not been defined", name)) },
+            Expr::Variable(_) => self.errors.push("Global body must be static".to_string()),
             Expr::Null => panic!("FATAL: Attempting to resolve null expression, this indicates the parser has failed catasrophically"),
             Expr::VarDeclar { variable: _, body: _ } => panic!("FATAL: Attempting to resolve var declar in a global declaration, this indicates the parser has failed catastrophically"),
         }
@@ -310,7 +319,7 @@ impl<'ctx> Resolver<'ctx> {
     /// 
     /// When the resolver tries to resolve a top level statement that is not a function declaration, this should never happen as long as the parser works correctly.
     fn resolve_function(&mut self, function: Stmt) {
-        trace!("Resolving function");
+        trace!("Resolving function: {}", function);
         let (prototype, body) = match function {
             Stmt::Function { prototype, body, is_anon: _ } => (*prototype, body),
             _ => panic!("FATAL: Attempting to resolve non-function statement whilst resolving function, this indicates the parser has failed catasrophically")
@@ -322,10 +331,12 @@ impl<'ctx> Resolver<'ctx> {
         };
 
         // Add function arguments to a scope
+        trace!("Adding function arguments to scope");
         let mut args_scope = Scope::new();
         args_scope.parent = Some(self.globals.scope.clone());
 
         for arg in args {
+            trace!("Adding argument: {}", arg);
             let variable = Variable { scope_location: None, pointer_value: None };
             if args_scope.set_variable(arg.clone(), variable).is_some() {
                 self.errors.push("Duplicate argument: ".to_string() + &arg);
@@ -334,6 +345,7 @@ impl<'ctx> Resolver<'ctx> {
         let args = Rc::from(RefCell::from(args_scope));
 
         // Run through the body of the function and add variables to scope
+        trace!("Resolving function body");
         let mut scope = Scope::new();
         scope.parent = Some(args.clone());
         let scope = Rc::from(RefCell::from(scope));
@@ -358,7 +370,7 @@ impl<'ctx> Resolver<'ctx> {
     /// 
     /// The resolved statement.
     fn resolve_stmt(&mut self, scope: Rc<RefCell<Scope<'ctx>>>, stmt: Stmt) -> Statement<'ctx> {
-        trace!("Resolving statement");
+        trace!("Resolving statement: {}", stmt);
         match stmt {
             Stmt::Expression { expr } => {
                 self.resolve_expr(scope, &expr);
@@ -414,7 +426,7 @@ impl<'ctx> Resolver<'ctx> {
     /// - `expr` - The expression to resolve.
     /// - `errors` - Vector of errors to add to.
     fn resolve_expr(&mut self, scope: Rc<RefCell<Scope>>, expr: &Expr) {
-        trace!("Resolving expression");
+        trace!("Resolving expression: {}", expr);
         match expr {
             Expr::VarDeclar { variable, body } => {
                 self.resolve_expr(scope.clone(), body);
@@ -444,7 +456,7 @@ impl<'ctx> Resolver<'ctx> {
     /// - `name` - The name of the variable.
     /// - `errors` - Vector of errors to add to.
     fn resolve_variable(&mut self, scope: Rc<RefCell<Scope>>, name: &String) {
-        trace!("Checking variable: {}", name);
+        trace!("Resolving variable: {}", name);
 
         // If the variable has been declared already in the local scope, nothing needs to be done
         if scope.borrow_mut().get_variable(name).is_some() { return; }
@@ -596,13 +608,13 @@ mod tests {
     #[test]
     fn global_undeclared_val() {
         let err = run_err("global var x = y; fun main() {}");
-        assert_eq!(vec!["Variable: y has not been defined"], err)
+        assert_eq!(vec!["Global body must be static"], err)
     }
 
+    #[test]
     fn global_variable_val() {
-        let (globals, _) = run("global var y = 1; global var x = y + 1; fun main() {}");
-        assert!(globals.contains_global("y"));
-        assert!(globals.contains_global("x"))
+        let err = run_err("global var y = 1; global var x = y + 1; fun main() {}");
+        assert_eq!(vec!["Global body must be static"], err)
     }
 
     // TODO: When nested bodies are added, test them
