@@ -1,6 +1,16 @@
 use std::{error::Error, fmt::Display, iter::Peekable, ops::DerefMut, str::Chars};
 use crate::trace;
 
+macro_rules! trace_lexer {
+    ($($arg:tt)*) => {
+        if cfg!(debug_assertions) {
+            if std::env::var("LEXER_TRACE").is_ok() {
+                trace!("LEXER", $($arg)*)
+            }
+        }
+    };
+}
+
 // TODO: Document this module better
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,7 +134,10 @@ impl<'a> Lexer<'a> {
         };
 
         if cfg!(debug_assertions) {
-            self.trace_result(&result);
+            match result {
+                Ok(ref token) => trace_lexer!("Produced token: {}", token),
+                Err(ref err) => trace_lexer!("Produced token: {}", err)
+            }
         }
         
         result
@@ -132,6 +145,7 @@ impl<'a> Lexer<'a> {
 
     /// Parse an identifier or keyword
     fn parse_ident(&mut self) -> LexResult {
+        trace_lexer!("Parsing identifier");
         let start = self.pos - 1;
         let col_start = self.col - 1;
 
@@ -175,6 +189,7 @@ impl<'a> Lexer<'a> {
 
     /// Parse a number literal
     fn parse_number(&mut self) -> LexResult {
+        trace_lexer!("Parsing number");
         let start = self.pos - 1;
         let col_start = self.col - 1;
 
@@ -209,6 +224,7 @@ impl<'a> Lexer<'a> {
     /// Parse a potential comment.
     fn potential_comment(&mut self) -> Token {
         if let Some('/') = self.chars.peek() {
+            trace_lexer!("Consuming comment");
             loop {
                 let char = self.chars.next();
                 self.pos += 1;
@@ -227,6 +243,7 @@ impl<'a> Lexer<'a> {
 
     /// Skip whitespace characters.
     fn skip_whitespace(&mut self) {
+        trace_lexer!("Skipping whitespace");
         while let Some(&char) = self.chars.peek() {
             if !char.is_whitespace() { break }
     
@@ -238,14 +255,6 @@ impl<'a> Lexer<'a> {
             } else {
                 self.col += 1;
             }
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    fn trace_result(&self, result: &LexResult) {
-        match result {
-            Ok(token) => trace!("{}", token),
-            Err(ref err) => trace!("{}", err)
         }
     }
 }

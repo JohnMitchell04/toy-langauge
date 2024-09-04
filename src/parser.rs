@@ -4,16 +4,26 @@ use crate::{lexer::{LexResult, Lexer, Token}, trace};
 
 // TODO: Document this module better
 
+macro_rules! trace_parser {
+    ($($arg:tt)*) => {
+        if cfg!(debug_assertions) {
+            if std::env::var("PARSER_TRACE").is_ok() {
+                trace!("PARSER", $($arg)*)
+            }
+        }
+    };
+}
+
 macro_rules! match_no_error {
     ($self:ident, $token:pat, $str:tt) => {
         match $self.peek() {
             Ok($token) => { _ = $self.next() },
             Ok(_) => {
-                trace!("Error: {}", $str);
+                trace_parser!("Error: {}", $str);
                 $self.errors.push(String::from($str))
             },
             Err(ref err) => {
-                trace!("Error: {}", err);
+                trace_parser!("Error: {}", err);
                 let message = err.error_message(); 
                 $self.errors.push(message);
             },
@@ -173,7 +183,7 @@ impl<'a> Parser<'a> {
     /// 
     /// **Start** ::= <[Function](Self::parse_function)>
     fn parse(mut self) -> Result<Vec<Stmt>, Vec<String>> {
-        trace!("Starting parse");
+        trace_parser!("Starting parse");
         let mut top_level = Vec::new();
 
         while let Ok(token) = self.peek() {
@@ -197,7 +207,7 @@ impl<'a> Parser<'a> {
     /// 
     /// **Top-level** ::= <[Global](Self::parse_global)> | <[Extern](Self::parse_extern)> | <[Function](Self::parse_function)>
     fn parse_top_level(&mut self) -> Stmt {
-        trace!("Parsing top level statemnt");
+        trace_parser!("Parsing top level statemnt");
         match self.peek() {
             Ok(Token::Global) => self.parse_global(),
             Ok(Token::Extern) => self.parse_extern(),
@@ -215,7 +225,7 @@ impl<'a> Parser<'a> {
     /// 
     /// **Global** ::= 'global' <[Var](Self::parse_var_stmt)>
     fn parse_global(&mut self) -> Stmt {
-        trace!("Parsing global expression");
+        trace_parser!("Parsing global expression");
         _ = self.next();
 
         self.parse_var_stmt()
@@ -225,7 +235,7 @@ impl<'a> Parser<'a> {
     /// 
     /// **Extern** ::= 'extern' <[Prototype](Self::parse_prototype)>
     fn parse_extern(&mut self) -> Stmt {
-        trace!("Parsing external");
+        trace_parser!("Parsing external");
         _ = self.next();
 
         let prototype = Box::new(self.parse_prototype());
@@ -236,7 +246,7 @@ impl<'a> Parser<'a> {
     /// 
     /// **Function** ::= 'fun' <[Prototype](Self::parse_prototype)> <[Body](Self::parse_body)>
     fn parse_function(&mut self) -> Stmt {
-        trace!("Parsing function definition");
+        trace_parser!("Parsing function definition");
 
         match_no_error!(self, Token::Fun, "Expected 'fun' keyword before function declaration");
 
@@ -251,7 +261,7 @@ impl<'a> Parser<'a> {
     /// 
     /// **Prototype** ::= <[Ident](Token::Ident)> '(' <[Ident](Token::Ident)>,* ')'
     fn parse_prototype(&mut self) -> Stmt {
-        trace!("Parsing prototype");
+        trace_parser!("Parsing prototype");
         let name = match self.peek() {
             Ok(Token::Ident(_)) => self.next().unwrap().take_name(),
             Ok(_) => { self.errors.push("Expected function identifier".to_string()); "".to_string() },
@@ -289,7 +299,7 @@ impl<'a> Parser<'a> {
     /// 
     /// **Body** ::= '{' <[Statement](Self::parse_stmt)>* '}'
     fn parse_body(&mut self) -> Vec<Stmt> {
-        trace!("Parsing body");
+        trace_parser!("Parsing body");
     
         match_no_error!(self, Token::LBrace, "Expected '{' before body");
 
@@ -313,7 +323,7 @@ impl<'a> Parser<'a> {
     /// | <[For](Self::parse_for_stmt)>
     /// | <[Var](Self::parse_var_stmt)>
     fn parse_stmt(&mut self) -> Stmt {
-        trace!("Parsing statement");
+        trace_parser!("Parsing statement");
         match self.peek() {
             Ok(Token::If) => self.parse_conditional_stmt(),
             Ok(Token::For) => self.parse_for_stmt(),
@@ -331,7 +341,7 @@ impl<'a> Parser<'a> {
     /// 
     /// **ExpressionStatement** ::= [Expression](Self::parse_expr) ';'
     fn parse_expr_stmt(&mut self) -> Stmt {
-        trace!("Parsing expression statement");
+        trace_parser!("Parsing expression statement");
 
         let expr = self.parse_expr();
 
@@ -357,7 +367,7 @@ impl<'a> Parser<'a> {
     /// 
     /// **Conditional** ::= 'if' '(' <[Expression](Self::parse_expr)> ')' <[Body](Self::parse_body)> ('else' <[Body](Self::parse_body)>)?
     fn parse_conditional_stmt(&mut self) -> Stmt {
-        trace!("Parsing conditional expression");
+        trace_parser!("Parsing conditional expression");
         _ = self.next();
 
         match_no_error!(self, Token::LParen, "Expected '(' after 'if' keyword");
@@ -394,7 +404,7 @@ impl<'a> Parser<'a> {
     /// 
     /// **For** ::= 'for' '(' <[Var](Self::parse_var_stmt)> ';' <[Expression](Self::parse_expr)> ';' <[Expression](Self::parse_expr)> ')' '{' <[Body](Self::parse_body)> '}'
     fn parse_for_stmt(&mut self) -> Stmt {
-        trace!("Parsing for expression");
+        trace_parser!("Parsing for expression");
         _ = self.next();
 
         match_no_error!(self, Token::LParen, "Expected '(' after for");
@@ -422,7 +432,7 @@ impl<'a> Parser<'a> {
     /// 
     /// **Var** ::= 'var' <[Ident](Token::Ident)> '=' <[Expression](Self::parse_expr)> ';'
     fn parse_var_stmt(&mut self) -> Stmt {
-        trace!("Parsing var expression");
+        trace_parser!("Parsing var expression");
         _ = self.next();
 
         let variable = match self.peek() {
@@ -443,14 +453,14 @@ impl<'a> Parser<'a> {
     // TODO: Try and find a better system for handling brackets, including mismatched ones
     /// Parse any expression, dealing with operator precedences.
     fn parse_expr(&mut self) -> Expr {
-        trace!("Parsing expression");
+        trace_parser!("Parsing expression");
         self.expr_binding(0)
     }
 
     // TODO: Add support for equality comparisons and logical operators
     /// Recursive expression binding parser.
     fn expr_binding(&mut self, min_binding: u8) -> Expr {
-        trace!("Parsing expression binding power: {}", min_binding);
+        trace_parser!("Parsing expression binding power: {}", min_binding);
         let mut left = match self.peek() {
             Ok(Token::Number(ref num)) => {
                 let num = *num;
@@ -521,6 +531,7 @@ impl<'a> Parser<'a> {
 
     /// Parse a identifier.
     fn parse_ident(&mut self) -> Expr {
+        trace_parser!("Parsing identifier");
         let name = if let Token::Ident(name) = self.next().unwrap() { name } else { panic!("FATAL: Tried to parse non-ident as ident expression, this should never happen") };
 
         match self.peek() {
@@ -555,7 +566,7 @@ impl<'a> Parser<'a> {
     // TODO: Expand to include pre-increment and pre-decrement and logical not
     /// Parse a unary expression.
     fn parse_unary(&mut self) -> Expr {
-        trace!("Parsing unary expression");
+        trace_parser!("Parsing unary expression");
         let op = if let Token::Op(op) = self.next().unwrap() { 
             op
         } else {
@@ -576,7 +587,7 @@ impl<'a> Parser<'a> {
 
     /// Get the binding power of some prefix operator.
     fn prefix_binding_power(&self, op: char) -> Option<((), u8)> {
-        trace!("Calculating prefix binding power");
+        trace_parser!("Calculating prefix binding power");
         match op {
             '-' => Some(((), 6)),
             _ => None,
@@ -585,7 +596,7 @@ impl<'a> Parser<'a> {
 
     /// Get the binding power of some infix operator.
     fn infix_binding_power(&self, op: &char) -> Option<(u8, u8)> {
-        trace!("Calculating infix binding power");
+        trace_parser!("Calculating infix binding power");
         match op {
             '(' => Some((0, 0)),
             '=' => Some((0, 1)), // TODO: Investigate with 4 = = 5
@@ -599,7 +610,7 @@ impl<'a> Parser<'a> {
     // TODO: Implement arrays
     /// Get the binding power of some postfix operator.
     fn postfix_binding_power(&self, op: char) -> Option<(u8, ())> {
-        trace!("Calculating postfix binding power");
+        trace_parser!("Calculating postfix binding power");
         match op {
             _ => None,
         }

@@ -2,6 +2,16 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use inkwell::values::{GlobalValue, PointerValue};
 use crate::{parser::{Expr, Stmt}, trace};
 
+macro_rules! trace_resolver {
+    ($($arg:tt)*) => {
+        if cfg!(debug_assertions) {
+            if std::env::var("RESOLVER_TRACE").is_ok() {
+                trace!("RESOLVER", $($arg)*)
+            }
+        }
+    };
+}
+
 // TOOD: Add type info
 /// Variable type that holds information about a variables location in logical scope and its LLVM [PointerValue].
 /// 
@@ -222,7 +232,7 @@ impl<'ctx> Globals<'ctx> {
 /// 
 /// A tuple containing the globals, functions or a vector containing any errors if present.
 pub fn resolve<'ctx>(top_level: Vec<Stmt>) -> Result<(Globals<'ctx>, HashMap<String, Function<'ctx>>), Vec<String>> {
-    trace!("Resolving top level");
+    trace_resolver!("Resolving top level");
     let mut resolver = Resolver { functions: HashMap::new(), globals: Globals::new(), errors: Vec::new() };
     let (function_definitions, top_level_stmts): (Vec<Stmt>, Vec<Stmt>) = top_level.into_iter().partition(|stmt| matches!(stmt, Stmt::Function { .. }));
 
@@ -271,7 +281,7 @@ impl<'ctx> Resolver<'ctx> {
     /// 
     /// When the resolver tries to resolve a top level statement that is not a variable declaration, this should never happen as long as the parser works correctly.
     fn resolve_top_expr(&mut self, expr: &Expr) {
-        trace!("Resolving top-level expression: {}", expr);
+        trace_resolver!("Resolving top-level expression: {}", expr);
         match expr {
             Expr::VarDeclar { variable, body } => {
                 // Ensure global is unqiue
@@ -292,7 +302,7 @@ impl<'ctx> Resolver<'ctx> {
 
     /// Ensure an expression within a global body contains only valid expressions and that any variables references are already declared.
     fn resolve_global_body(&mut self, expr: &Expr) {
-        trace!("Resolving global body: {}", expr);
+        trace_resolver!("Resolving global body: {}", expr);
         match expr {
             Expr::VarAssign { variable: _, body: _ } => self.errors.push("Global body must be static".to_string()),
             Expr::Binary { op: _, left, right } => {
@@ -319,7 +329,7 @@ impl<'ctx> Resolver<'ctx> {
     /// 
     /// When the resolver tries to resolve a top level statement that is not a function declaration, this should never happen as long as the parser works correctly.
     fn resolve_function(&mut self, function: Stmt) {
-        trace!("Resolving function: {}", function);
+        trace_resolver!("Resolving function: {}", function);
         let (prototype, body) = match function {
             Stmt::Function { prototype, body, is_anon: _ } => (*prototype, body),
             _ => panic!("FATAL: Attempting to resolve non-function statement whilst resolving function, this indicates the parser has failed catasrophically")
@@ -331,12 +341,12 @@ impl<'ctx> Resolver<'ctx> {
         };
 
         // Add function arguments to a scope
-        trace!("Adding function arguments to scope");
+        trace_resolver!("Adding function arguments to scope");
         let mut args_scope = Scope::new();
         args_scope.parent = Some(self.globals.scope.clone());
 
         for arg in args {
-            trace!("Adding argument: {}", arg);
+            trace_resolver!("Adding argument: {}", arg);
             let variable = Variable { scope_location: None, pointer_value: None };
             if args_scope.set_variable(arg.clone(), variable).is_some() {
                 self.errors.push("Duplicate argument: ".to_string() + &arg);
@@ -345,7 +355,7 @@ impl<'ctx> Resolver<'ctx> {
         let args = Rc::from(RefCell::from(args_scope));
 
         // Run through the body of the function and add variables to scope
-        trace!("Resolving function body");
+        trace_resolver!("Resolving function body");
         let mut scope = Scope::new();
         scope.parent = Some(args.clone());
         let scope = Rc::from(RefCell::from(scope));
@@ -370,7 +380,7 @@ impl<'ctx> Resolver<'ctx> {
     /// 
     /// The resolved statement.
     fn resolve_stmt(&mut self, scope: Rc<RefCell<Scope<'ctx>>>, stmt: Stmt) -> Statement<'ctx> {
-        trace!("Resolving statement: {}", stmt);
+        trace_resolver!("Resolving statement: {}", stmt);
         match stmt {
             Stmt::Expression { expr } => {
                 self.resolve_expr(scope, &expr);
@@ -426,7 +436,7 @@ impl<'ctx> Resolver<'ctx> {
     /// - `expr` - The expression to resolve.
     /// - `errors` - Vector of errors to add to.
     fn resolve_expr(&mut self, scope: Rc<RefCell<Scope>>, expr: &Expr) {
-        trace!("Resolving expression: {}", expr);
+        trace_resolver!("Resolving expression: {}", expr);
         match expr {
             Expr::VarDeclar { variable, body } => {
                 self.resolve_expr(scope.clone(), body);
@@ -456,7 +466,7 @@ impl<'ctx> Resolver<'ctx> {
     /// - `name` - The name of the variable.
     /// - `errors` - Vector of errors to add to.
     fn resolve_variable(&mut self, scope: Rc<RefCell<Scope>>, name: &String) {
-        trace!("Resolving variable: {}", name);
+        trace_resolver!("Resolving variable: {}", name);
 
         // If the variable has been declared already in the local scope, nothing needs to be done
         if scope.borrow_mut().get_variable(name).is_some() { return; }

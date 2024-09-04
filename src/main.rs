@@ -41,6 +41,18 @@ struct Cli {
 
     #[arg(short, long)]
     output_folder: Option<PathBuf>,
+
+    #[arg(short, long)]
+    lexer_trace: bool,
+
+    #[arg(short, long)]
+    parser_trace: bool,
+
+    #[arg(short, long)]
+    resolver_trace: bool,
+
+    #[arg(short, long)]
+    compiler_trace: bool,
 }
 
 fn main() {
@@ -51,6 +63,23 @@ fn main() {
         return;
     }
     let input = std::fs::read_to_string(args.source).expect("Error: Could not read file");
+
+    // Set up debug info
+    if args.lexer_trace {
+        std::env::set_var("LEXER_TRACE", "1");
+    }
+
+    if args.parser_trace {
+        std::env::set_var("PARSER_TRACE", "1");
+    }
+
+    if args.resolver_trace {
+        std::env::set_var("RESOLVER_TRACE", "1");
+    }
+
+    if args.compiler_trace {
+        std::env::set_var("COMPILER_TRACE", "1");
+    }
 
     let context = Context::create();
     let module = match compiler::compile(&input, &context) {

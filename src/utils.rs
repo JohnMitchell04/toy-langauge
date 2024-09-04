@@ -1,8 +1,8 @@
 #[macro_export]
 macro_rules! trace {
-    ($($arg:tt)*) => {
+    ($location:expr, $($arg:tt)*) => {
         if cfg!(debug_assertions) {
-            println!("TRACE: {}", format_args!($($arg)*))
+            println!("{:>8} TRACE: {}", $location, format_args!($($arg)*))
         }
     };
 }

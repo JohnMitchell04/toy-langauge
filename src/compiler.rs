@@ -7,6 +7,16 @@ use inkwell::{
 };
 use crate::{parser::{parse, Expr, Stmt}, resolver::{resolve, Function, Globals}, trace};
 
+macro_rules! trace_compiler {
+    ($($arg:tt)*) => {
+        if cfg!(debug_assertions) {
+            if std::env::var("COMPILER_TRACE").is_ok() {
+                trace!("COMPILER", $($arg)*)
+            }
+        }
+    };
+}
+
 /// Compile the provided source in the provided context.
 /// 
 /// **Arguments:**
@@ -39,7 +49,7 @@ struct Compiler<'ctx> {
 
 impl<'ctx> Compiler<'ctx> {
     fn compile(mut self) -> Result<Module<'ctx>, Vec<String>> {
-        trace!("Compiling module");
+        trace_compiler!("Compiling module");
 
         // Compile globals
         self.compile_globals();
@@ -48,7 +58,7 @@ impl<'ctx> Compiler<'ctx> {
     }
 
     fn compile_globals(&mut self)  {
-        trace!("Compiling globals");
+        trace_compiler!("Compiling globals");
 
         // TODO: See if a cleaner solution without the variable clones can work
         let mut values = Vec::new();
@@ -73,6 +83,7 @@ impl<'ctx> Compiler<'ctx> {
     /// Compile the body into a value so that the global can be initialised.
     fn compile_global_body(&self, body: &Expr) -> FloatValue<'ctx> {
         // TODO: Need to rework when types are added
+        trace_compiler!("Compiling global body: {}", body);
         match body {
             Expr::Binary { op, left, right } => {
                 let lhs = self.compile_global_body(left).get_constant().unwrap().0;
