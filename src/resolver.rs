@@ -1,5 +1,5 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
-use inkwell::values::PointerValue;
+use inkwell::values::{GlobalValue, PointerValue};
 use crate::{parser::{Expr, Stmt}, trace};
 
 // TOOD: Add type info
@@ -67,6 +67,33 @@ impl<'ctx> Scope<'ctx> {
     pub fn set_variable(&mut self, name: String, variable: Variable<'ctx>) -> Option<Variable<'ctx>> {
         self.variables.insert(name, variable)
     }
+
+    /// Check whether the variable is in scope.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the variable to be checked.
+    pub fn contains_variable(&self, name: &str) -> bool {
+        self.variables.contains_key(name)
+    }
+
+    /// Set a variable's pointer value.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the variable to set.
+    /// - `variable` - The [`Variable`] to set.
+    /// 
+    /// **Returns:**
+    /// 
+    /// [`Err`] if the variable is not present, otherwise nothing.
+    pub fn set_variable_pointer(&mut self, name: &str, pointer_value: PointerValue<'ctx>) -> Result<(), ()> {
+        match self.variables.get_mut(name) {
+            Some(variable) => {
+                variable.pointer_value = Some(pointer_value);
+                Ok(())
+            },
+            None => Err(()),
+        }
+    }
 }
 
 /// A resolved [Stmt], this differs in that we now have resolved the scopes of the variables referred to in the [Stmt].
@@ -118,6 +145,15 @@ impl<'ctx> Globals<'ctx> {
         self.stmts = stmts
     }
 
+    /// Get the statements in global scope.
+    /// 
+    /// **Returns:**
+    /// 
+    /// Slice of all top level statements.
+    pub fn get_top_level(&self) -> &[Stmt] {
+        &self.stmts
+    }
+
     /// Get some global.
     /// 
     /// **Arguments:**
@@ -141,6 +177,27 @@ impl<'ctx> Globals<'ctx> {
     /// [None] if the global is not already present, otherwise the [`Variable`] that was set before.
     pub fn set_global(&mut self, name: String, variable: Variable<'ctx>) -> Option<Variable<'ctx>> {
         self.scope.borrow_mut().set_variable(name, variable)
+    }
+
+    /// Check whether the global is defined.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the global to be checked.
+    pub fn contains_global(&self, name: &str) -> bool {
+        self.scope.borrow().contains_variable(name)
+    }
+
+    /// Set a global's pointer value.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the global.
+    /// - `pointer` - The [`GlobalValue`] to set.
+    /// 
+    /// **Returns:**
+    /// 
+    /// [Err] if the variable is not present, otherwise nothing.
+    pub fn set_global_pointer(&mut self, name: &str, global_value: GlobalValue<'ctx>) -> Result<(), ()> {
+        self.scope.borrow_mut().set_variable_pointer(name, global_value.as_pointer_value())
     }
 }
 
@@ -204,16 +261,41 @@ impl<'ctx> Resolver<'ctx> {
     fn resolve_top_expr(&mut self, expr: &Expr) {
         trace!("Resolving top-level expression");
         match expr {
-            Expr::VarDeclar { variable, body: _ } => {
+            Expr::VarDeclar { variable, body } => {
+                // Ensure global is unqiue
                 if self.globals.get_global(variable).is_some() {
                     self.errors.push(format!("Global: {} is already defined", variable));
                     return;
                 }
 
+                // Ensure the global body is valid
+                self.resolve_global_body(body);
+
                 let variable_val = Variable { scope_location: None, pointer_value: None};
                 self.globals.set_global(variable.to_string(), variable_val);
             },
             _ => panic!("FATAL: Attempting to resolve invalid top-level statement, this indicates the parser has failed catasrophically")
+        }
+    }
+
+    /// Ensure an expression within a global body contains only valid expressions and that any variables references are already declared.
+    fn resolve_global_body(&mut self, expr: &Expr) {
+        trace!("Resolving global body");
+        match expr {
+            Expr::VarAssign { variable, body } => {
+                if !self.globals.contains_global(&variable) { self.errors.push(format!("Variable: {} has not been defined", variable)) }
+                self.resolve_global_body(body)
+            },
+            Expr::Binary { op: _, left, right } => {
+                self.resolve_global_body(left);
+                self.resolve_global_body(right)
+            },
+            Expr::Unary { op: _, right } => self.resolve_global_body(right),
+            Expr::Call { fn_name: _, args: _ } => self.errors.push("Cannot initalise global with a function call".to_string()),
+            Expr::Number(_) => {},
+            Expr::Variable(name) => if !self.globals.contains_global(name) { self.errors.push(format!("Variable: {} has not been defined", name)) },
+            Expr::Null => panic!("FATAL: Attempting to resolve null expression, this indicates the parser has failed catasrophically"),
+            Expr::VarDeclar { variable: _, body: _ } => panic!("FATAL: Attempting to resolve var declar in a global declaration, this indicates the parser has failed catastrophically"),
         }
     }
 
@@ -408,14 +490,14 @@ mod tests {
     #[test]
     fn global_defintion() {
         let (globals, _) = run("global var x = 5; fun main() {}");
-        assert!(globals.get_global("x").is_some())
+        assert!(globals.contains_global("x"))
     }
 
     #[test]
     fn use_global_definition() {
         let (_, functions) = run("global var x = 5; fun main() { x; }");
         let function = functions.get("main").unwrap();
-        assert!(function.scope.borrow().variables.contains_key("x"))
+        assert!(function.scope.borrow().contains_variable("x"))
     }
 
     #[test]
@@ -446,7 +528,7 @@ mod tests {
     fn variable_use_after_declar() {
         let (_, functions) = run("fun main() { var x = 1; x; }");
         let function = functions.get("main").unwrap();
-        assert!(function.scope.borrow().variables.contains_key("x"))
+        assert!(function.scope.borrow().contains_variable("x"))
     }
 
     #[test]
@@ -464,7 +546,7 @@ mod tests {
     fn arg() {
         let (_, functions) = run("fun main(x) {}");
         let function = functions.get("main").unwrap();
-        assert!(function.args.borrow().variables.contains_key("x"))
+        assert!(function.args.borrow().contains_variable("x"))
     }
 
     #[test]
@@ -477,14 +559,14 @@ mod tests {
     fn if_statement() {
         let (_, functions) = run("fun main() { var y = 1; if (y) { var x = y + 1; x; }}");
         let function = functions.get("main").unwrap();
-        assert!(function.scope.borrow().variables.contains_key("y"));
+        assert!(function.scope.borrow().contains_variable("y"));
 
         let conditional = function.body.last().unwrap();
         assert!(matches!(conditional, Statement::Conditional { cond: _, then: _, otherwise: _, then_scope: _, otherwise_scope: _ }));
 
         if let Statement::Conditional { cond: _, then: _, otherwise: _, then_scope, otherwise_scope } = conditional {
-            assert!(then_scope.borrow().variables.contains_key("x"));
-            assert!(then_scope.borrow().variables.contains_key("y"));
+            assert!(then_scope.borrow().contains_variable("x"));
+            assert!(then_scope.borrow().contains_variable("y"));
             assert!(otherwise_scope.borrow().variables.is_empty());
         }
     }
@@ -493,16 +575,34 @@ mod tests {
     fn for_statement() {
         let (_, functions) = run("fun main() { var y = 1; for (var x = y + 1; x < 3; x = x + 1) { var z = 2; z; } }");
         let function = functions.get("main").unwrap();
-        assert!(function.scope.borrow().variables.contains_key("y"));
+        assert!(function.scope.borrow().contains_variable("y"));
 
         let for_statement = function.body.last().unwrap();
         assert!(matches!(for_statement, Statement::For { start: _, condition: _, step: _, body: _, scope: _ }));
 
         if let Statement::For { start: _, condition: _, step: _, body: _, scope } = for_statement {
-            assert!(scope.borrow().variables.contains_key("y"));
-            assert!(scope.borrow().variables.contains_key("x"));
-            assert!(scope.borrow().variables.contains_key("z"));
+            assert!(scope.borrow().contains_variable("y"));
+            assert!(scope.borrow().contains_variable("x"));
+            assert!(scope.borrow().contains_variable("z"));
         }
+    }
+
+    #[test]
+    fn global_call_val() {
+        let err = run_err("global var x = main(); fun main() {}");
+        assert_eq!(vec!["Cannot initalise global with a function call"], err)
+    }
+
+    #[test]
+    fn global_undeclared_val() {
+        let err = run_err("global var x = y; fun main() {}");
+        assert_eq!(vec!["Variable: y has not been defined"], err)
+    }
+
+    fn global_variable_val() {
+        let (globals, _) = run("global var y = 1; global var x = y + 1; fun main() {}");
+        assert!(globals.contains_global("y"));
+        assert!(globals.contains_global("x"))
     }
 
     // TODO: When nested bodies are added, test them
