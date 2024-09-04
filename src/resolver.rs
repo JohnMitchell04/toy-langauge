@@ -144,13 +144,6 @@ impl<'a> Globals<'a> {
     }
 }
 
-/// Contains all state for resolving a file.
-struct ResolverState<'a> {
-    functions: HashMap<String, Function<'a>>,
-    globals: Globals<'a>,
-    errors: Vec<String>,
-}
-
 /// Resolve the provided top level [`Stmt`], and retrieve the globals and functions.
 /// 
 /// **Arguments:**
@@ -167,7 +160,7 @@ pub fn resolve<'a>(top_level: Vec<Stmt>) -> Result<(Globals<'a>, HashMap<String,
     // Ensure we resolve globals first 
     for stmt in top_level_stmts.iter() {
         match stmt {
-            Stmt::Expression { expr } => resolve_top_expr(&mut state, expr),
+            Stmt::Expression { expr } => state.resolve_top_expr(expr),
             _ => panic!("FATAL: Attempting to compile invalid top-level statement, this indicates the parser has failed catasrophically"),
         }
     }
@@ -176,13 +169,13 @@ pub fn resolve<'a>(top_level: Vec<Stmt>) -> Result<(Globals<'a>, HashMap<String,
     // Resolve functions
     for stmt in function_definitions.into_iter() {
         match stmt {
-            Stmt::Function { .. } => resolve_function(&mut state, stmt),
+            Stmt::Function { .. } => state.resolve_function(stmt),
             _ => panic!("FATAL: Attempting to resolve non function as a function, this indicates the parser has failed catasrophically"),
         }
     }
 
     // Ensure we have a main function that has been resolved
-    if state.functions.get("main").is_none() { state.errors.push("No main function found".to_string()) }
+    if !state.functions.contains_key("main") { state.errors.push("No main function found".to_string()) }
 
     if state.errors.is_empty() {
         Ok((state.globals, state.functions))
@@ -191,200 +184,209 @@ pub fn resolve<'a>(top_level: Vec<Stmt>) -> Result<(Globals<'a>, HashMap<String,
     }
 }
 
-/// Add global declarations to global scope and ensure they are not redefined.
-/// 
-/// **Arguments:**
-/// - `state` - The current [ResolverState].
-/// - `expr` - The top level expression to evaluate.
-/// 
-/// **Panics:**
-/// 
-/// When the resolver tries to resolve a top level statement that is not a variable declaration, this should never happen as long as the parser works correctly.
-fn resolve_top_expr(state: &mut ResolverState, expr: &Expr) {
-    trace!("Resolving top-level expression");
-    match expr {
-        Expr::VarDeclar { variable, body: _ } => {
-            if state.globals.get_global(variable).is_some() {
-                state.errors.push(format!("Global: {} is already defined", variable));
+/// Contains all state for resolving a file.
+struct ResolverState<'a> {
+    functions: HashMap<String, Function<'a>>,
+    globals: Globals<'a>,
+    errors: Vec<String>,
+}
+
+impl<'a> ResolverState<'a> {
+    /// Add global declarations to global scope and ensure they are not redefined.
+    /// 
+    /// **Arguments:**
+    /// - `state` - The current [ResolverState].
+    /// - `expr` - The top level expression to evaluate.
+    /// 
+    /// **Panics:**
+    /// 
+    /// When the resolver tries to resolve a top level statement that is not a variable declaration, this should never happen as long as the parser works correctly.
+    fn resolve_top_expr(&mut self, expr: &Expr) {
+        trace!("Resolving top-level expression");
+        match expr {
+            Expr::VarDeclar { variable, body: _ } => {
+                if self.globals.get_global(variable).is_some() {
+                    self.errors.push(format!("Global: {} is already defined", variable));
+                    return;
+                }
+
+                let variable_val = Variable { scope_location: None, pointer_value: None};
+                self.globals.set_global(variable.to_string(), variable_val);
+            },
+            _ => panic!("FATAL: Attempting to resolve invalid top-level statement, this indicates the parser has failed catasrophically")
+        }
+    }
+
+
+    /// Resolve function declarations and add to map of functions.
+    /// 
+    /// **Arguments:**
+    /// - `state` - The current [ResolverState].
+    /// - `expr` - The function expression to evaluate.
+    /// 
+    /// **Panics:**
+    /// 
+    /// When the resolver tries to resolve a top level statement that is not a function declaration, this should never happen as long as the parser works correctly.
+    fn resolve_function(&mut self, function: Stmt) {
+        trace!("Resolving function");
+        let (prototype, body) = match function {
+            Stmt::Function { prototype, body, is_anon: _ } => (*prototype, body),
+            _ => panic!("FATAL: Attempting to resolve non-function statement whilst resolving function, this indicates the parser has failed catasrophically")
+        };
+
+        let (name, args) = match prototype {
+            Stmt::Prototype { name, args } => (name, args),
+            _ => panic!("FATAL: Attempting to resolve non-prototype statement whilst resolving function, this indicates the parser has failed catasrophically")
+        };
+
+        // Add function arguments to a scope
+        let mut args_scope = Scope::new();
+        args_scope.parent = Some(self.globals.scope.clone());
+
+        for arg in args {
+            let variable = Variable { scope_location: None, pointer_value: None };
+            if args_scope.set_variable(arg.clone(), variable).is_some() {
+                self.errors.push("Duplicate argument: ".to_string() + &arg);
+            }
+        }
+        let args = Rc::from(RefCell::from(args_scope));
+
+        // Run through the body of the function and add variables to scope
+        let mut scope = Scope::new();
+        scope.parent = Some(args.clone());
+        let scope = Rc::from(RefCell::from(scope));
+
+        let mut resolved_body = Vec::new();
+        for stmt in body {
+            resolved_body.push(self.resolve_stmt(scope.clone(), stmt));
+        }
+
+        let function = Function { name: name.clone(), args, body: resolved_body, scope };
+        self.functions.insert(name, function);
+    }
+
+    /// Resolve a statement.
+    /// 
+    /// **Arguments:**
+    /// - `scope` - The scope the statement is in.
+    /// - `stmt` - The statement to resolve.
+    /// - `errors` - Vector of errors to add to.
+    /// 
+    /// **Resturns:**
+    /// 
+    /// The resolved statement.
+    fn resolve_stmt(&mut self, scope: Rc<RefCell<Scope<'a>>>, stmt: Stmt) -> Statement<'a> {
+        trace!("Resolving statement");
+        match stmt {
+            Stmt::Expression { expr } => {
+                self.resolve_expr(scope, &expr);
+                Statement::Expression { expr }
+            },
+            Stmt::For { start, condition, step, body } => {
+                let mut for_scope = Scope::new();
+                for_scope.parent = Some(scope);
+                let for_scope = Rc::from(RefCell::from(for_scope));
+
+                self.resolve_expr(for_scope.clone(), &start);
+                self.resolve_expr(for_scope.clone(), &condition);
+                self.resolve_expr(for_scope.clone(), &step);
+
+                let mut resolved_body = Vec::new();
+                for stmt in body {
+                    resolved_body.push(self.resolve_stmt(for_scope.clone(), stmt))
+                }
+
+                Statement::For { start, condition, step, body: resolved_body, scope: for_scope }
+            },
+            Stmt::Conditional { cond, then, otherwise } => {
+                self.resolve_expr(scope.clone(), &cond);
+
+                let mut then_scope = Scope::new();
+                then_scope.parent = Some(scope.clone());
+                let then_scope = Rc::from(RefCell::from(then_scope));
+
+                let mut otherwise_scope = Scope::new();
+                otherwise_scope.parent = Some(scope);
+                let otherwise_scope = Rc::from(RefCell::from(otherwise_scope));
+
+                let mut resolved_then = Vec::new();
+                for stmt in then {
+                    resolved_then.push(self.resolve_stmt(then_scope.clone(), stmt))
+                }
+
+                let mut resolved_otherwise = Vec::new();
+                for stmt in otherwise {
+                    resolved_otherwise.push(self.resolve_stmt(otherwise_scope.clone(), stmt))
+                }
+
+                Statement::Conditional { cond, then: resolved_then, otherwise: resolved_otherwise, then_scope, otherwise_scope }
+            },
+            _ => panic!("FATAL: Attempting to resolve function statement in local scope, this indicates the parser has failed catasrophically")
+        }
+    }
+
+    /// Resolve an expression.
+    /// 
+    /// **Arguments:**
+    /// - `scope` - The scope the expression is in.
+    /// - `expr` - The expression to resolve.
+    /// - `errors` - Vector of errors to add to.
+    fn resolve_expr(&mut self, scope: Rc<RefCell<Scope>>, expr: &Expr) {
+        trace!("Resolving expression");
+        match expr {
+            Expr::VarDeclar { variable, body } => {
+                self.resolve_expr(scope.clone(), body);
+                let variable_val = Variable { scope_location: None, pointer_value: None };
+                scope.borrow_mut().set_variable(variable.to_string(), variable_val);
+            },
+            Expr::VarAssign { variable, body } => {
+                self.resolve_variable(scope.clone(), variable);
+                self.resolve_expr(scope, body);
+            },
+            Expr::Binary { op: _, left, right } => {
+                self.resolve_expr(scope.clone(), left);
+                self.resolve_expr(scope, right);
+            },
+            Expr::Unary { op: _, right } => self.resolve_expr(scope, right),
+            Expr::Call { fn_name: _, args } => for arg in args { self.resolve_expr(scope.clone(), arg) },
+            Expr::Number(_) => {},
+            Expr::Variable(name) => self.resolve_variable(scope, name),
+            Expr::Null => panic!("FATAL: Attempting to resolve null expression, this indicates the parser has failed catasrophically")
+        }
+    }
+
+    /// Ensure the variable has been declared somewhere and point the variables scope to that location.
+    /// 
+    /// **Arguments:**
+    /// - `scope` - The scope the variable is in.
+    /// - `name` - The name of the variable.
+    /// - `errors` - Vector of errors to add to.
+    fn resolve_variable(&mut self, scope: Rc<RefCell<Scope>>, name: &String) {
+        trace!("Checking variable: {}", name);
+
+        // If the variable has been declared already in the local scope, nothing needs to be done
+        if scope.borrow_mut().get_variable(name).is_some() { return; }
+
+        // Move up scopes, looking for the variable
+        let mut higher_scope = scope.borrow().get_parent();
+        while let Some(cur_scope) = higher_scope {
+            if let Some(up_scope) = cur_scope.borrow().get_variable(name) {
+                if up_scope.scope_location.is_some() {
+                    scope.borrow_mut().variables.insert(name.to_string(), up_scope.clone());
+                } else {
+                    let variable = Variable { scope_location: Some(cur_scope.clone()), pointer_value: None };
+                    scope.borrow_mut().variables.insert(name.to_string(), variable);
+                }
+
                 return;
             }
 
-            let variable_val = Variable { scope_location: None, pointer_value: None};
-            state.globals.set_global(variable.to_string(), variable_val);
-        },
-        _ => panic!("FATAL: Attempting to resolve invalid top-level statement, this indicates the parser has failed catasrophically")
-    }
-}
-
-
-/// Resolve function declarations and add to map of functions.
-/// 
-/// **Arguments:**
-/// - `state` - The current [ResolverState].
-/// - `expr` - The function expression to evaluate.
-/// 
-/// **Panics:**
-/// 
-/// When the resolver tries to resolve a top level statement that is not a function declaration, this should never happen as long as the parser works correctly.
-fn resolve_function(state: &mut ResolverState, function: Stmt) {
-    trace!("Resolving function");
-    let (prototype, body) = match function {
-        Stmt::Function { prototype, body, is_anon: _ } => (*prototype, body),
-        _ => panic!("FATAL: Attempting to resolve non-function statement whilst resolving function, this indicates the parser has failed catasrophically")
-    };
-
-    let (name, args) = match prototype {
-        Stmt::Prototype { name, args } => (name, args),
-        _ => panic!("FATAL: Attempting to resolve non-prototype statement whilst resolving function, this indicates the parser has failed catasrophically")
-    };
-
-    // Add function arguments to a scope
-    let mut args_scope = Scope::new();
-    args_scope.parent = Some(state.globals.scope.clone());
-
-    for arg in args {
-        let variable = Variable { scope_location: None, pointer_value: None };
-        if args_scope.set_variable(arg.clone(), variable).is_some() {
-            state.errors.push("Duplicate argument: ".to_string() + &arg);
-        }
-    }
-    let args = Rc::from(RefCell::from(args_scope));
-
-    // Run through the body of the function and add variables to scope
-    let mut scope = Scope::new();
-    scope.parent = Some(args.clone());
-    let scope = Rc::from(RefCell::from(scope));
-
-    let mut resolved_body = Vec::new();
-    for stmt in body {
-        resolved_body.push(resolve_stmt(scope.clone(), stmt, &mut state.errors));
-    }
-
-    let function = Function { name: name.clone(), args, body: resolved_body, scope };
-    state.functions.insert(name, function);
-}
-
-/// Resolve a statement.
-/// 
-/// **Arguments:**
-/// - `scope` - The scope the statement is in.
-/// - `stmt` - The statement to resolve.
-/// - `errors` - Vector of errors to add to.
-/// 
-/// **Resturns:**
-/// 
-/// The resolved statement.
-fn resolve_stmt<'a>(scope: Rc<RefCell<Scope<'a>>>, stmt: Stmt, errors: &mut Vec<String>) -> Statement<'a> {
-    trace!("Resolving statement");
-    match stmt {
-        Stmt::Expression { expr } => {
-            resolve_expr(scope, &expr, errors);
-            Statement::Expression { expr }
-        },
-        Stmt::For { start, condition, step, body } => {
-            let mut for_scope = Scope::new();
-            for_scope.parent = Some(scope);
-            let for_scope = Rc::from(RefCell::from(for_scope));
-
-            resolve_expr(for_scope.clone(), &start, errors);
-            resolve_expr(for_scope.clone(), &condition, errors);
-            resolve_expr(for_scope.clone(), &step, errors);
-
-            let mut resolved_body = Vec::new();
-            for stmt in body {
-                resolved_body.push(resolve_stmt(for_scope.clone(), stmt, errors))
-            }
-
-            Statement::For { start, condition, step, body: resolved_body, scope: for_scope }
-        },
-        Stmt::Conditional { cond, then, otherwise } => {
-            resolve_expr(scope.clone(), &cond, errors);
-
-            let mut then_scope = Scope::new();
-            then_scope.parent = Some(scope.clone());
-            let then_scope = Rc::from(RefCell::from(then_scope));
-
-            let mut otherwise_scope = Scope::new();
-            otherwise_scope.parent = Some(scope);
-            let otherwise_scope = Rc::from(RefCell::from(otherwise_scope));
-
-            let mut resolved_then = Vec::new();
-            for stmt in then {
-                resolved_then.push(resolve_stmt(then_scope.clone(), stmt, errors))
-            }
-
-            let mut resolved_otherwise = Vec::new();
-            for stmt in otherwise {
-                resolved_otherwise.push(resolve_stmt(otherwise_scope.clone(), stmt, errors))
-            }
-
-            Statement::Conditional { cond, then: resolved_then, otherwise: resolved_otherwise, then_scope, otherwise_scope }
-        },
-        _ => panic!("FATAL: Attempting to resolve function statement in local scope, this indicates the parser has failed catasrophically")
-    }
-}
-
-/// Resolve an expression.
-/// 
-/// **Arguments:**
-/// - `scope` - The scope the expression is in.
-/// - `expr` - The expression to resolve.
-/// - `errors` - Vector of errors to add to.
-fn resolve_expr(scope: Rc<RefCell<Scope>>, expr: &Expr, errors: &mut Vec<String>) {
-    trace!("Resolving expression");
-    match expr {
-        Expr::VarDeclar { variable, body } => {
-            resolve_expr(scope.clone(), body, errors);
-            let variable_val = Variable { scope_location: None, pointer_value: None };
-            scope.borrow_mut().set_variable(variable.to_string(), variable_val);
-        },
-        Expr::VarAssign { variable, body } => {
-            resolve_variable(scope.clone(), variable, errors);
-            resolve_expr(scope, body, errors);
-        },
-        Expr::Binary { op: _, left, right } => {
-            resolve_expr(scope.clone(), left, errors);
-            resolve_expr(scope, right, errors);
-        },
-        Expr::Unary { op: _, right } => resolve_expr(scope, right, errors),
-        Expr::Call { fn_name: _, args } => for arg in args { resolve_expr(scope.clone(), arg, errors) },
-        Expr::Number(_) => {},
-        Expr::Variable(name) => resolve_variable(scope, name, errors),
-        Expr::Null => panic!("FATAL: Attempting to resolve null expression, this indicates the parser has failed catasrophically")
-    }
-}
-
-/// Ensure the variable has been declared somewhere and point the variables scope to that location.
-/// 
-/// **Arguments:**
-/// - `scope` - The scope the variable is in.
-/// - `name` - The name of the variable.
-/// - `errors` - Vector of errors to add to.
-fn resolve_variable(scope: Rc<RefCell<Scope>>, name: &String, errors: &mut Vec<String>) {
-    trace!("Checking variable: {}", name);
-
-    // If the variable has been declared already in the local scope, nothing needs to be done
-    if scope.borrow_mut().get_variable(name).is_some() { return; }
-
-    // Move up scopes, looking for the variable
-    let mut higher_scope = scope.borrow().get_parent();
-    while let Some(cur_scope) = higher_scope {
-        if let Some(up_scope) = cur_scope.borrow().get_variable(name) {
-            if up_scope.scope_location.is_some() {
-                scope.borrow_mut().variables.insert(name.to_string(), up_scope.clone());
-            } else {
-                let variable = Variable { scope_location: Some(cur_scope.clone()), pointer_value: None };
-                scope.borrow_mut().variables.insert(name.to_string(), variable);
-            }
-
-            return;
+            higher_scope = cur_scope.borrow().parent.clone();
         }
 
-        higher_scope = cur_scope.borrow().parent.clone();
-    }
-
-    // The variable was not found anywhere
-    errors.push("Could not find variable: ".to_string() + name)
+        // The variable was not found anywhere
+        self.errors.push("Could not find variable: ".to_string() + name)
+}
 }
 
 #[cfg(test)]
