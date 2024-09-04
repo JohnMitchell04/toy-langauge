@@ -9,18 +9,18 @@ use crate::{parser::{Expr, Stmt}, trace};
 /// 
 /// The `pointer_value` is not filled in by the resolver but the compiler adds this information to point to the LLVM value when producing IR.
 #[derive(Clone)]
-pub struct Variable<'a> {
-    scope_location: Option<Rc<RefCell<Scope<'a>>>>,
-    pointer_value: Option<PointerValue<'a>>
+pub struct Variable<'ctx> {
+    scope_location: Option<Rc<RefCell<Scope<'ctx>>>>,
+    pointer_value: Option<PointerValue<'ctx>>
 }
 
 /// A scope in the program, containing information about variables declared within it and a parent scope if one exists.
-pub struct Scope<'a> {
-    variables: HashMap<String, Variable<'a>>,
-    parent: Option<Rc<RefCell<Scope<'a>>>>,
+pub struct Scope<'ctx> {
+    variables: HashMap<String, Variable<'ctx>>,
+    parent: Option<Rc<RefCell<Scope<'ctx>>>>,
 }
 
-impl<'a> Scope<'a> {
+impl<'ctx> Scope<'ctx> {
     /// Create a new scope with no variables and no parent.
     pub fn new() -> Self {
         Scope { variables: HashMap::new(), parent: None }
@@ -31,7 +31,7 @@ impl<'a> Scope<'a> {
     /// **Returns:**
     /// 
     /// The parent if the scope has one, [None] otherwise
-    pub fn get_parent(&self) -> Option<Rc<RefCell<Scope<'a>>>> {
+    pub fn get_parent(&self) -> Option<Rc<RefCell<Scope<'ctx>>>> {
         self.parent.clone()
     }
 
@@ -39,7 +39,7 @@ impl<'a> Scope<'a> {
     /// 
     /// **Arguments:**
     /// - `parent` - A reference to the parent.
-    pub fn set_parent(&mut self, parent: Rc<RefCell<Scope<'a>>>) {
+    pub fn set_parent(&mut self, parent: Rc<RefCell<Scope<'ctx>>>) {
         self.parent = Some(parent)
     }
 
@@ -51,7 +51,7 @@ impl<'a> Scope<'a> {
     /// **Returns:**
     /// 
     /// [`None`] if the variable is not present in the scope, otherwise an [`Variable`].
-    pub fn get_variable(&self, name: &str) -> Option<&Variable<'a>> {
+    pub fn get_variable(&self, name: &str) -> Option<&Variable<'ctx>> {
         self.variables.get(name)
     }
 
@@ -64,26 +64,26 @@ impl<'a> Scope<'a> {
     /// **Returns:**
     /// 
     /// [None] if the variable is not already present, otherwise the [`Variable`] that was set before.
-    pub fn set_variable(&mut self, name: String, variable: Variable<'a>) -> Option<Variable<'a>> {
+    pub fn set_variable(&mut self, name: String, variable: Variable<'ctx>) -> Option<Variable<'ctx>> {
         self.variables.insert(name, variable)
     }
 }
 
 /// A resolved [Stmt], this differs in that we now have resolved the scopes of the variables referred to in the [Stmt].
-pub enum Statement<'a> {
+pub enum Statement<'ctx> {
     Conditional {
         cond: Expr,
-        then: Vec<Statement<'a>>,
-        otherwise: Vec<Statement<'a>>,
-        then_scope: Rc<RefCell<Scope<'a>>>,
-        otherwise_scope: Rc<RefCell<Scope<'a>>>,
+        then: Vec<Statement<'ctx>>,
+        otherwise: Vec<Statement<'ctx>>,
+        then_scope: Rc<RefCell<Scope<'ctx>>>,
+        otherwise_scope: Rc<RefCell<Scope<'ctx>>>,
     },
     For {
         start: Expr,
         condition: Expr,
         step: Expr,
-        body: Vec<Statement<'a>>,
-        scope: Rc<RefCell<Scope<'a>>>,
+        body: Vec<Statement<'ctx>>,
+        scope: Rc<RefCell<Scope<'ctx>>>,
     },
     Expression {
         expr: Expr,
@@ -91,20 +91,20 @@ pub enum Statement<'a> {
 }
 
 /// A function in the program, contains information about variable scope and all statements contained within it.
-pub struct Function<'a> {
+pub struct Function<'ctx> {
     name: String,
-    args: Rc<RefCell<Scope<'a>>>,
-    body: Vec<Statement<'a>>,
-    scope: Rc<RefCell<Scope<'a>>>,
+    args: Rc<RefCell<Scope<'ctx>>>,
+    body: Vec<Statement<'ctx>>,
+    scope: Rc<RefCell<Scope<'ctx>>>,
 }
 
 ///The global scope of the program, contains the top level statements and global variables.
-pub struct Globals<'a> {
+pub struct Globals<'ctx> {
     stmts: Vec<Stmt>,
-    scope: Rc<RefCell<Scope<'a>>>,
+    scope: Rc<RefCell<Scope<'ctx>>>,
 }
 
-impl<'a> Globals<'a> {
+impl<'ctx> Globals<'ctx> {
     /// Create a new global scope.
     pub fn new() -> Self {
         Globals { stmts: Vec::new(), scope: Rc::from(RefCell::from(Scope::new())) }
@@ -126,7 +126,7 @@ impl<'a> Globals<'a> {
     /// **Returns:**
     /// 
     /// [`None`] if the global is not present, otherwise an [`Variable`].
-    pub fn get_global(&self, name: &str) -> Option<Variable<'a>> {
+    pub fn get_global(&self, name: &str) -> Option<Variable<'ctx>> {
         self.scope.borrow().get_variable(name).cloned()
     }
 
@@ -139,7 +139,7 @@ impl<'a> Globals<'a> {
     /// **Returns:**
     /// 
     /// [None] if the global is not already present, otherwise the [`Variable`] that was set before.
-    pub fn set_global(&mut self, name: String, variable: Variable<'a>) -> Option<Variable<'a>> {
+    pub fn set_global(&mut self, name: String, variable: Variable<'ctx>) -> Option<Variable<'ctx>> {
         self.scope.borrow_mut().set_variable(name, variable)
     }
 }
@@ -151,47 +151,47 @@ impl<'a> Globals<'a> {
 /// 
 /// **Returns:**
 /// 
-/// A tuple containing the globals, functions.
-pub fn resolve<'a>(top_level: Vec<Stmt>) -> Result<(Globals<'a>, HashMap<String, Function<'a>>), Vec<String>> {
+/// A tuple containing the globals, functions or a vector containing any errors if present.
+pub fn resolve<'ctx>(top_level: Vec<Stmt>) -> Result<(Globals<'ctx>, HashMap<String, Function<'ctx>>), Vec<String>> {
     trace!("Resolving top level");
-    let mut state = ResolverState { functions: HashMap::new(), globals: Globals::new(), errors: Vec::new() };
+    let mut resolver = Resolver { functions: HashMap::new(), globals: Globals::new(), errors: Vec::new() };
     let (function_definitions, top_level_stmts): (Vec<Stmt>, Vec<Stmt>) = top_level.into_iter().partition(|stmt| matches!(stmt, Stmt::Function { .. }));
 
     // Ensure we resolve globals first 
     for stmt in top_level_stmts.iter() {
         match stmt {
-            Stmt::Expression { expr } => state.resolve_top_expr(expr),
+            Stmt::Expression { expr } => resolver.resolve_top_expr(expr),
             _ => panic!("FATAL: Attempting to compile invalid top-level statement, this indicates the parser has failed catasrophically"),
         }
     }
-    state.globals.set_top_level(top_level_stmts);
+    resolver.globals.set_top_level(top_level_stmts);
 
     // Resolve functions
     for stmt in function_definitions.into_iter() {
         match stmt {
-            Stmt::Function { .. } => state.resolve_function(stmt),
+            Stmt::Function { .. } => resolver.resolve_function(stmt),
             _ => panic!("FATAL: Attempting to resolve non function as a function, this indicates the parser has failed catasrophically"),
         }
     }
 
     // Ensure we have a main function that has been resolved
-    if !state.functions.contains_key("main") { state.errors.push("No main function found".to_string()) }
+    if !resolver.functions.contains_key("main") { resolver.errors.push("No main function found".to_string()) }
 
-    if state.errors.is_empty() {
-        Ok((state.globals, state.functions))
+    if resolver.errors.is_empty() {
+        Ok((resolver.globals, resolver.functions))
     } else {
-        Err(state.errors)
+        Err(resolver.errors)
     }
 }
 
 /// Contains all state for resolving a file.
-struct ResolverState<'a> {
-    functions: HashMap<String, Function<'a>>,
-    globals: Globals<'a>,
+struct Resolver<'ctx> {
+    functions: HashMap<String, Function<'ctx>>,
+    globals: Globals<'ctx>,
     errors: Vec<String>,
 }
 
-impl<'a> ResolverState<'a> {
+impl<'ctx> Resolver<'ctx> {
     /// Add global declarations to global scope and ensure they are not redefined.
     /// 
     /// **Arguments:**
@@ -275,7 +275,7 @@ impl<'a> ResolverState<'a> {
     /// **Resturns:**
     /// 
     /// The resolved statement.
-    fn resolve_stmt(&mut self, scope: Rc<RefCell<Scope<'a>>>, stmt: Stmt) -> Statement<'a> {
+    fn resolve_stmt(&mut self, scope: Rc<RefCell<Scope<'ctx>>>, stmt: Stmt) -> Statement<'ctx> {
         trace!("Resolving statement");
         match stmt {
             Stmt::Expression { expr } => {
@@ -396,12 +396,12 @@ mod tests {
     use super::{resolve, Function, Globals};
 
     fn run<'a>(input: &str) -> (Globals<'a>, HashMap<String, Function<'a>>) {
-        let stmts = parser::Parser::new(input).parse().unwrap();
+        let stmts = parser::parse(input).unwrap();
         resolve(stmts).unwrap()
     }
 
     fn run_err(input: &str) -> Vec<String> {
-        let stmts = parser::Parser::new(input).parse().unwrap();
+        let stmts = parser::parse(input).unwrap();
         if let Err(errs) = resolve(stmts) { errs } else { panic!("FATAL: The resolver has successfully resolved incorrect input") }
     }
 
