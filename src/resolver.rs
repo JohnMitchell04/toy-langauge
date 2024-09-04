@@ -181,6 +181,9 @@ pub fn resolve<'a>(top_level: Vec<Stmt>) -> Result<(Globals<'a>, HashMap<String,
         }
     }
 
+    // Ensure we have a main function that has been resolved
+    if state.functions.get("main").is_none() { state.errors.push("No main function found".to_string()) }
+
     if state.errors.is_empty() {
         Ok((state.globals, state.functions))
     } else {
@@ -402,76 +405,76 @@ mod tests {
 
     #[test]
     fn global_defintion() {
-        let (globals, _) = run("global var x = 5;");
+        let (globals, _) = run("global var x = 5; fun main() {}");
         assert!(globals.get_global("x").is_some())
     }
 
     #[test]
     fn use_global_definition() {
-        let (_, functions) = run("global var x = 5; fun test() { x; }");
-        let function = functions.get("test").unwrap();
+        let (_, functions) = run("global var x = 5; fun main() { x; }");
+        let function = functions.get("main").unwrap();
         assert!(function.scope.borrow().variables.contains_key("x"))
     }
 
     #[test]
     fn function_definition() {
-        let (_, functions) = run("fun test() {}");
-        assert!(functions.contains_key("test"))
+        let (_, functions) = run("fun main() {}");
+        assert!(functions.contains_key("main"))
     }
 
     #[test]
     fn undeclared_variable() {
-        let err = run_err("fun test() { var x = y; }");
+        let err = run_err("fun main() { var x = y; }");
         assert_eq!(vec!["Could not find variable: y"], err)
     }
 
     #[test]
     fn variable_use_before_declar() {
-        let err = run_err("fun test() { x; var x = 1; }");
+        let err = run_err("fun main() { x; var x = 1; }");
         assert_eq!(vec!["Could not find variable: x"], err)
     }
 
     #[test]
     fn variable_use_in_declaration() {
-        let err = run_err("fun test() { var x = x + 1; }");
+        let err = run_err("fun main() { var x = x + 1; }");
         assert_eq!(vec!["Could not find variable: x"], err)
     }
 
     #[test]
     fn variable_use_after_declar() {
-        let (_, functions) = run("fun test() { var x = 1; x; }");
-        let function = functions.get("test").unwrap();
+        let (_, functions) = run("fun main() { var x = 1; x; }");
+        let function = functions.get("main").unwrap();
         assert!(function.scope.borrow().variables.contains_key("x"))
     }
 
     #[test]
     fn variable_redeclar() {
-        let _ = run("fun test() { var x = 1; var x = 2; }");
+        let _ = run("fun main() { var x = 1; var x = 2; }");
     }
 
     #[test]
     fn global_redeclar() {
-        let err = run_err("global var x = 1; global var x = 2;");
+        let err = run_err("global var x = 1; global var x = 2; fun main() {}");
         assert_eq!(vec!["Global: x is already defined"], err);
     }
 
     #[test]
     fn arg() {
-        let (_, functions) = run("fun test(x) {}");
-        let function = functions.get("test").unwrap();
+        let (_, functions) = run("fun main(x) {}");
+        let function = functions.get("main").unwrap();
         assert!(function.args.borrow().variables.contains_key("x"))
     }
 
     #[test]
     fn duplicate_arg() {
-        let err = run_err("fun test(x, x) {}");
+        let err = run_err("fun main(x, x) {}");
         assert_eq!(vec!["Duplicate argument: x"], err)
     }
 
     #[test]
     fn if_statement() {
-        let (_, functions) = run("fun test() { var y = 1; if (y) { var x = y + 1; x; }}");
-        let function = functions.get("test").unwrap();
+        let (_, functions) = run("fun main() { var y = 1; if (y) { var x = y + 1; x; }}");
+        let function = functions.get("main").unwrap();
         assert!(function.scope.borrow().variables.contains_key("y"));
 
         let conditional = function.body.last().unwrap();
@@ -486,8 +489,8 @@ mod tests {
 
     #[test]
     fn for_statement() {
-        let (_, functions) = run("fun test() { var y = 1; for (var x = y + 1; x < 3; x = x + 1) { var z = 2; z; } }");
-        let function = functions.get("test").unwrap();
+        let (_, functions) = run("fun main() { var y = 1; for (var x = y + 1; x < 3; x = x + 1) { var z = 2; z; } }");
+        let function = functions.get("main").unwrap();
         assert!(function.scope.borrow().variables.contains_key("y"));
 
         let for_statement = function.body.last().unwrap();

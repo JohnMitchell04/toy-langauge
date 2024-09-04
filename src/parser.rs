@@ -429,6 +429,7 @@ impl<'a> Parser<'a> {
         Stmt::Expression { expr: Expr::VarDeclar { variable, body } }
     }
 
+    // TODO: Try and find a better system for handling brackets, including mismatched ones
     /// Parse any expression, dealing with operator precedences.
     fn parse_expr(&mut self) -> Expr {
         trace!("Parsing expression");
