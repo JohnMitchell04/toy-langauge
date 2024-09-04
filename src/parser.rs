@@ -141,8 +141,21 @@ impl Display for Stmt {
     }
 }
 
+/// Parse the given input and retrieve the top level statements of the input
+/// 
+/// **Arguments:**
+/// - `input` - The source code to parse.
+/// 
+/// **Resturns:**
+/// 
+/// A vector of top level statements or a vector of errors if present
+pub fn parse(input: &str) -> Result<Vec<Stmt>, Vec<String>> {
+    let parser = Parser::new(input);
+    parser.parse()
+}
+
 // TODO: Convert errors to an actual error type and include locational information
-pub struct Parser<'a> {
+struct Parser<'a> {
     lexer: Peekable<Lexer<'a>>,
     errors: Vec<String>,
 }
@@ -161,7 +174,7 @@ impl<'a> Parser<'a> {
     /// Parse the given input, will return a vector of top level [`Stmt`].
     /// 
     /// **Start** ::= <[Function](Self::parse_function)>
-    pub fn parse(&mut self) -> Result<Vec<Stmt>, Vec<String>> {
+    fn parse(mut self) -> Result<Vec<Stmt>, Vec<String>> {
         trace!("Starting parse");
         let mut top_level = Vec::new();
 
@@ -603,12 +616,12 @@ mod tests {
     use super::Parser;
 
     fn parse_no_error(input: &str) -> Vec<Stmt> {
-        let mut parser = Parser::new(input);
+        let parser = Parser::new(input);
         parser.parse().unwrap()
     }
 
     fn parse_error(input: &str) -> Vec<String> {
-        let mut parser = Parser::new(input);
+        let parser = Parser::new(input);
         if let Err(errs) = parser.parse() { errs } else { panic!("FATAL: The parser successfully parsed incorrect input") }
     }
 
