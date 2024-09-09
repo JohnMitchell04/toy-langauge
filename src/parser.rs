@@ -75,9 +75,10 @@ pub enum Expr {
         right: Box<Expr>
     },
     Call {
-        fn_name: String,
+        function_name: String,
         args: Vec<Expr>,
     },
+    // TODO: Change this to be a literal so that it can hold any type info
     Number(f64),
     Variable(String),
     VarDeclar {
@@ -96,7 +97,7 @@ impl Display for Expr {
         match self {
             Self::Binary { op, left, right } => write!(f, "{} {} {}", left.as_ref(), op, right.as_ref()),
             Self::Unary { op, right } => write!(f, "{} {}", op, right.as_ref()),
-            Self::Call { fn_name, args } => write!(f, "Call: <fn({}) {}>", args.iter().join(","), fn_name),
+            Self::Call { function_name: fn_name, args } => write!(f, "Call: <fn({}) {}>", args.iter().join(","), fn_name),
             Self::Number(num) => write!(f, "{}", num),
             Self::Variable(ident) => write!(f, "{}", ident),
             Self::VarDeclar { variable, body } => write!(f, "{} = {}", variable, body),
@@ -363,6 +364,7 @@ impl<'a> Parser<'a> {
         Stmt::Expression { expr }
     }
 
+    // TODO: Restrict the conditional to only expressions that produce a boolean
     /// Parse a conditional statement.
     /// 
     /// **Conditional** ::= 'if' '(' <[Expression](Self::parse_expr)> ')' <[Body](Self::parse_body)> ('else' <[Body](Self::parse_body)>)?
@@ -400,6 +402,7 @@ impl<'a> Parser<'a> {
 
     // TODO: Make fields optional
     // TODO: Allow the user to use any expression as an initialiser so they can declare a variable or do something to another variable
+    // TODO: Restrict the conditional to only expressions that produce a boolean
     /// Parse a for expression.
     /// 
     /// **For** ::= 'for' '(' <[Var](Self::parse_var_stmt)> ';' <[Expression](Self::parse_expr)> ';' <[Expression](Self::parse_expr)> ')' '{' <[Body](Self::parse_body)> '}'
@@ -556,7 +559,7 @@ impl<'a> Parser<'a> {
 
                 match_no_error!(self, Token::RParen, "Expected ')' after args list");
 
-                Expr::Call { fn_name: name, args }
+                Expr::Call { function_name: name, args }
             },
             Ok(_) => Expr::Variable(name),
             Err(_) => Expr::Variable(name),
@@ -652,6 +655,12 @@ mod tests {
     }
 
     #[test]
+    fn empty_func_comment() {
+        let res = parse_no_error("fun test() { // this is a comment \n}");
+        assert_eq!(create_function(vec![], vec![]), res[0])
+    }
+
+    #[test]
     fn func_arg() {
         let res = parse_no_error("fun test(x, y, z) {}");
         assert_eq!(create_function(vec!["x".to_string(), "y".to_string(), "z".to_string()], vec![]), res[0])
@@ -705,14 +714,14 @@ mod tests {
     #[test]
     fn call() {
         let res = parse_no_error("fun test() { function(); }");
-        assert_eq!(create_function(vec![], vec![Stmt::Expression { expr: Expr::Call { fn_name: "function".to_string(), args: vec![] } }]), res[0])
+        assert_eq!(create_function(vec![], vec![Stmt::Expression { expr: Expr::Call { function_name: "function".to_string(), args: vec![] } }]), res[0])
     }
 
     #[test]
     fn call_args() {
         let res = parse_no_error("fun test() { function(x, y, z); }");
         assert_eq!(create_function(vec![], vec![
-                Stmt::Expression { expr: Expr::Call { fn_name: "function".to_string(), args: vec![Expr::Variable("x".to_string()), Expr::Variable("y".to_string()), Expr::Variable("z".to_string())] } }
+                Stmt::Expression { expr: Expr::Call { function_name: "function".to_string(), args: vec![Expr::Variable("x".to_string()), Expr::Variable("y".to_string()), Expr::Variable("z".to_string())] } }
             ]),
             res[0]
         )

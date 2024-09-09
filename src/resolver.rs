@@ -1,5 +1,5 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
-use inkwell::values::{GlobalValue, PointerValue};
+use inkwell::values::{FunctionValue, GlobalValue, PointerValue};
 use crate::{parser::{Expr, Stmt}, trace};
 
 macro_rules! trace_resolver {
@@ -13,46 +13,64 @@ macro_rules! trace_resolver {
 }
 
 // TOOD: Add type info
-/// Variable type that holds information about a variables location in logical scope and its LLVM [PointerValue].
-/// 
-/// A `scope_location` value of [None] indicates the variable is defined in the local scope, otherwise it points to the scope where the variable is declared.
+/// Variable type that holds information about its LLVM [PointerValue].
 /// 
 /// The `pointer_value` is not filled in by the resolver but the compiler adds this information to point to the LLVM value when producing IR.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Variable<'ctx> {
-    scope_location: Option<Rc<RefCell<Scope<'ctx>>>>,
     pointer_value: Option<PointerValue<'ctx>>
 }
 
 impl<'ctx> Variable<'ctx> {
-    /// Retrieve the variable's scope location.
-    pub fn get_scope_location(&self) -> Option<Rc<RefCell<Scope<'ctx>>>> {
-        self.scope_location.clone()
+    /// Create a new variable.
+    pub fn new() -> Self {
+        Variable { pointer_value: None }
     }
 
     /// Retrieve the variable's pointer value.
-    pub fn get_pointer_value(&self) -> Option<PointerValue<'ctx>> {
-        self.pointer_value.clone()
+    /// 
+    /// **Returns**:
+    /// 
+    /// The [`PointerValue`] if set otherwise [`None`].
+    /// 
+    /// **Panics:**
+    /// 
+    /// This method is only expected to be used in the compiler when evaluating a variable load, so the variable must already be initialised.
+    /// In the compiler we know this should be the case because the resolver should have caught it if it is not the case, if a panic ever occurs it is
+    /// because of programmer error in the resolver, this should never panic if the source is valid.
+    pub fn get_pointer_value(&self) -> PointerValue<'ctx> {
+        self.pointer_value.expect("FATAL: Value not initialised")
+    }
+
+    /// Set the variable's pointer value.
+    /// 
+    /// **Arguments:**
+    /// - `pointer_value` - The [`PointerValue`] to set.
+    pub fn set_pointer_value(&mut self, pointer_value: PointerValue<'ctx>) {
+        self.pointer_value = Some(pointer_value)
     }
 }
 
 /// A scope in the program, containing information about variables declared within it and a parent scope if one exists.
+#[derive(Debug, Clone)]
 pub struct Scope<'ctx> {
-    variables: HashMap<String, Variable<'ctx>>,
+    variables: HashMap<String, Rc<RefCell<Variable<'ctx>>>>,
+    up_values: HashMap<String, Rc<RefCell<Variable<'ctx>>>>,
+    functions: HashMap<String, Rc<RefCell<Option<FunctionValue<'ctx>>>>>,
     parent: Option<Rc<RefCell<Scope<'ctx>>>>,
 }
 
 impl<'ctx> Scope<'ctx> {
     /// Create a new scope with no variables and no parent.
     pub fn new() -> Self {
-        Scope { variables: HashMap::new(), parent: None }
+        Scope { variables: HashMap::new(), up_values: HashMap::new(), functions: HashMap::new(), parent: None }
     }
 
     /// Get the scope's parent.
     ///
     /// **Returns:**
     /// 
-    /// The parent if the scope has one, [None] otherwise
+    /// The parent if the scope has one, [`None`] otherwise
     pub fn get_parent(&self) -> Option<Rc<RefCell<Scope<'ctx>>>> {
         self.parent.clone()
     }
@@ -61,7 +79,7 @@ impl<'ctx> Scope<'ctx> {
     /// 
     /// **Arguments:**
     /// - `parent` - A reference to the parent.
-    pub fn set_parent(&mut self, parent: Rc<RefCell<Scope<'ctx>>>) {
+    fn set_parent(&mut self, parent: Rc<RefCell<Scope<'ctx>>>) {
         self.parent = Some(parent)
     }
 
@@ -72,12 +90,22 @@ impl<'ctx> Scope<'ctx> {
     /// 
     /// **Returns:**
     /// 
-    /// [`None`] if the variable is not present in the scope, otherwise an [`Variable`].
-    pub fn get_variable(&self, name: &str) -> Option<&Variable<'ctx>> {
-        self.variables.get(name)
+    /// The [`Variable`] in the scope.
+    /// 
+    /// **Panics:**
+    /// 
+    /// This method is only used in the compiler where the variable should exist if the resolver is working correctly,
+    /// and once in the resolver when we are sure the variable exists. Thus an option is not returned and instead the method
+    /// assumes the variable exists. If this panics it indicates a programmer error
+    pub fn get_variable(&self, name: &str) -> Rc<RefCell<Variable<'ctx>>> {
+        if let Some(variable) = self.variables.get(name) {
+            return variable.clone()
+        }
+
+        self.up_values.get(name).cloned().expect("FATAL: Variable not in scope")
     }
 
-    /// Set a variable in the scope.
+    /// Set a variable in the scope. This does not mutate the shared variable, instead it gives the scope shared ownership of a new variable.
     /// 
     /// **Arguments:**
     /// - `name` - The name of the variable to set.
@@ -85,36 +113,97 @@ impl<'ctx> Scope<'ctx> {
     /// 
     /// **Returns:**
     /// 
-    /// [None] if the variable is not already present, otherwise the [`Variable`] that was set before.
-    pub fn set_variable(&mut self, name: String, variable: Variable<'ctx>) -> Option<Variable<'ctx>> {
+    /// [`None`] if the variable is not already present, otherwise the [`Variable`] that was set before.
+    fn set_variable(&mut self, name: String, variable: Rc<RefCell<Variable<'ctx>>>) -> Option<Rc<RefCell<Variable<'ctx>>>> {
         self.variables.insert(name, variable)
+    }
+
+    /// Set a variable pointing to a higher scope variable. This does not mutate the shared variable, instead it gives the scope shared ownership of a new variable.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the variable to set.
+    /// - `variable` - The [`Variable`] to set.
+    /// 
+    /// **Returns:**
+    /// 
+    /// [`None`] if the variable is not already present, otherwise [`Variable`] that was set before.
+    fn set_up_value(&mut self, name: String, variable: Rc<RefCell<Variable<'ctx>>>) -> Option<Rc<RefCell<Variable<'ctx>>>> {
+        self.up_values.insert(name, variable)
     }
 
     /// Check whether the variable is in scope.
     /// 
     /// **Arguments:**
     /// - `name` - The name of the variable to be checked.
-    pub fn contains_variable(&self, name: &str) -> bool {
-        self.variables.contains_key(name)
+    fn contains_variable(&self, name: &str) -> bool {
+        self.variables.contains_key(name) || self.up_values.contains_key(name)
     }
 
-    /// Set a variable's pointer value.
+    /// Set a variable's pointer value. This mutates the shared ownership of the value, thus setting the same pointer value for all other owners.
     /// 
     /// **Arguments:**
     /// - `name` - The name of the variable to set.
     /// - `variable` - The [`Variable`] to set.
     /// 
+    /// **Panics:**
+    /// 
+    /// This method is only expected to be used in the compiler when evaluating a variable assignment, so the variable must already be declared.
+    /// In the compiler we know this should be the case because the resolver should have caught it if it is not the case, if a panic ever occurs it is
+    /// because of programmer error in the resolver, this should never panic if the source is valid.
+    pub fn set_variable_pointer(&mut self, name: &str, pointer_value: PointerValue<'ctx>) {
+        if let Some(variable) = self.variables.get_mut(name) {
+            variable.borrow_mut().set_pointer_value(pointer_value);
+            return
+        }
+    
+        self.up_values.get_mut(name).expect("FATAL: Variable not in scope").borrow_mut().set_pointer_value(pointer_value)
+    }
+
+    /// Get shared ownership of a function pointer.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the function to get.
+    fn get_function(&self, name: &str) -> Rc<RefCell<Option<FunctionValue<'ctx>>>> {
+        self.functions.get(name).cloned().unwrap()
+    }
+
+    /// Get a function pointer.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the function pointer to get.
+    /// 
     /// **Returns:**
     /// 
-    /// [`Err`] if the variable is not present, otherwise nothing.
-    pub fn set_variable_pointer(&mut self, name: &str, pointer_value: PointerValue<'ctx>) -> Result<(), ()> {
-        match self.variables.get_mut(name) {
-            Some(variable) => {
-                variable.pointer_value = Some(pointer_value);
-                Ok(())
-            },
-            None => Err(()),
-        }
+    /// The [`FunctionValue`] pointer to the function.
+    /// 
+    /// **Panics:**
+    /// 
+    /// This method is only expected to be used in the compiler when evaluating a function call, so the function must already be defined and located.
+    /// In the compiler we know this should be the case because the resolver should have caught it if it is not the case, if a panic ever occurs it is
+    /// because of programmer error in the resolver, this should never panic if the source is valid.
+    pub fn get_function_pointer(&self, name: &str) -> FunctionValue<'ctx> {
+        self.functions.get(name).unwrap().borrow().expect("FATAL: Function not initialised")
+    }
+
+    /// Add a function to the local scope.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the function to add.
+    fn add_function(&mut self, name: String, function: Rc<RefCell<Option<FunctionValue<'ctx>>>>) {
+        self.functions.insert(name, function);
+    }
+
+    /// Check whether the function is already scope.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the function to be checked.
+    fn contains_function(&self, name: &str) -> bool {
+        self.functions.contains_key(name)
+    }
+
+    /// Retieve an iterator over the variables.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Rc<RefCell<Variable<'ctx>>>)> {
+        self.variables.iter()
     }
 }
 
@@ -141,10 +230,9 @@ pub enum Statement<'ctx> {
 
 /// A function in the program, contains information about variable scope and all statements contained within it.
 pub struct Function<'ctx> {
-    name: String,
-    args: Rc<RefCell<Scope<'ctx>>>,
-    body: Vec<Statement<'ctx>>,
-    scope: Rc<RefCell<Scope<'ctx>>>,
+    pub args: Rc<RefCell<Scope<'ctx>>>,
+    pub body: Vec<Statement<'ctx>>,
+    pub scope: Rc<RefCell<Scope<'ctx>>>,
 }
 
 ///The global scope of the program, contains the top level statements and global variables.
@@ -163,8 +251,8 @@ impl<'ctx> Globals<'ctx> {
     /// 
     /// **Arguments:**
     /// - `stmts` - The top level statements to add to the global. 
-    pub fn set_top_level(&mut self, stmts: Vec<Stmt>) {
-        self.stmts = stmts
+    fn add_top_level(&mut self, stmts: Stmt) {
+        self.stmts.push(stmts)
     }
 
     /// Get the statements in global scope.
@@ -176,19 +264,7 @@ impl<'ctx> Globals<'ctx> {
         &self.stmts
     }
 
-    /// Get some global.
-    /// 
-    /// **Arguments:**
-    /// - `name` - The name of the global to retrieve.
-    /// 
-    /// **Returns:**
-    /// 
-    /// [`None`] if the global is not present, otherwise an [`Variable`].
-    pub fn get_global(&self, name: &str) -> Option<Variable<'ctx>> {
-        self.scope.borrow().get_variable(name).cloned()
-    }
-
-    /// Set a global.
+    /// Set a global. This does not mutate the shared variable, instead it gives the scope shared ownership of a new variable.
     /// 
     /// **Arguments:**
     /// - `name` - The name of the global to set.
@@ -197,7 +273,7 @@ impl<'ctx> Globals<'ctx> {
     /// **Returns:**
     /// 
     /// [None] if the global is not already present, otherwise the [`Variable`] that was set before.
-    pub fn set_global(&mut self, name: String, variable: Variable<'ctx>) -> Option<Variable<'ctx>> {
+    fn set_global(&mut self, name: String, variable: Rc<RefCell<Variable<'ctx>>>) -> Option<Rc<RefCell<Variable<'ctx>>>> {
         self.scope.borrow_mut().set_variable(name, variable)
     }
 
@@ -205,21 +281,80 @@ impl<'ctx> Globals<'ctx> {
     /// 
     /// **Arguments:**
     /// - `name` - The name of the global to be checked.
-    pub fn contains_global(&self, name: &str) -> bool {
+    fn contains_global(&self, name: &str) -> bool {
         self.scope.borrow().contains_variable(name)
     }
 
-    /// Set a global's pointer value.
+    /// Set a global's pointer value. This mutates the shared ownership of the global, thus setting the pointer value for all other owners.
     /// 
     /// **Arguments:**
     /// - `name` - The name of the global.
     /// - `pointer` - The [`GlobalValue`] to set.
     /// 
+    /// **Panics:**
+    /// 
+    /// This method is only expected to be used in the compiler when evaluating a global assignment, so the global must already be declared.
+    /// In the compiler we know this should be the case because the resolver should have caught it if it is not, if a panic ever occurs it is
+    /// because of programmer error in the resolver, this should never panic if the source is valid.
+    pub fn set_global_pointer(&mut self, name: &str, global_value: GlobalValue<'ctx>) {
+        self.scope.borrow_mut().set_variable_pointer(name, global_value.as_pointer_value())
+    }
+
+    /// Get shared ownership of a function pointer.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the function to get.
+    fn get_function(&self, name: &str) -> Rc<RefCell<Option<FunctionValue<'ctx>>>> {
+        self.scope.borrow().get_function(name)
+    }
+
+    /// Get a function pointer.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the function pointer to get.
+    /// 
     /// **Returns:**
     /// 
-    /// [Err] if the variable is not present, otherwise nothing.
-    pub fn set_global_pointer(&mut self, name: &str, global_value: GlobalValue<'ctx>) -> Result<(), ()> {
-        self.scope.borrow_mut().set_variable_pointer(name, global_value.as_pointer_value())
+    /// The [`FunctionValue`] pointer to the function.
+    /// 
+    /// **Panics:**
+    /// 
+    /// This method is only expected to be used in the compiler when evaluating a function call, so the function must already be defined and located.
+    /// In the compiler we know this should be the case because the resolver should have caught it if it is not the case, if a panic ever occurs it is
+    /// because of programmer error in the resolver, this should never panic if the source is valid.
+    pub fn get_function_pointer(&self, name: &str) -> FunctionValue<'ctx> {
+        self.scope.borrow().get_function_pointer(name)
+    }
+
+    /// Add a function to the global scope.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the function to add.
+    fn add_function(&mut self, name: String) {
+        self.scope.borrow_mut().functions.insert(name, Rc::from(RefCell::from(None)));
+    }
+
+    /// Set a function's pointer. This mutates the shared ownership of the function pointer, thus changing the value for all other owners.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the function to set the pointer of.
+    /// - `function_pointer` - The [`FunctionValue`] to set.
+    /// 
+    /// **Panics:**
+    /// 
+    /// This method is only expected to be used in the compiler when evaluating a function definition, so the function must already be resolved.
+    /// In the compiler we know this should be the case because the resolver should have caught it if it is not the case, if a panic ever occurs it is
+    /// because of programmer error in the resolver, this should never panic if the source is valid.
+    pub fn set_function_pointer(&mut self, name: &str, function_pointer: FunctionValue<'ctx>) {
+        *self.scope.borrow_mut().functions.get_mut(name).expect("FATAL: Function not Declared") = Rc::from(RefCell::from(Some(function_pointer)))
+    }
+
+    /// Check whether the function pointer is already scope.
+    /// 
+    /// **Arguments:**
+    /// - `name` - The name of the function to be checked.
+    fn contains_function_pointer(&self, name: &str) -> bool {
+        self.scope.borrow().contains_function(name)
     }
 }
 
@@ -233,23 +368,32 @@ impl<'ctx> Globals<'ctx> {
 /// A tuple containing the globals, functions or a vector containing any errors if present.
 pub fn resolve<'ctx>(top_level: Vec<Stmt>) -> Result<(Globals<'ctx>, HashMap<String, Function<'ctx>>), Vec<String>> {
     trace_resolver!("Resolving top level");
-    let mut resolver = Resolver { functions: HashMap::new(), globals: Globals::new(), errors: Vec::new() };
+    let mut resolver = Resolver { globals: Globals::new(), errors: Vec::new(), functions: HashMap::new() };
     let (function_definitions, top_level_stmts): (Vec<Stmt>, Vec<Stmt>) = top_level.into_iter().partition(|stmt| matches!(stmt, Stmt::Function { .. }));
 
     // Ensure we resolve globals first 
-    for stmt in top_level_stmts.iter() {
+    for stmt in top_level_stmts.into_iter() {
         match stmt {
-            Stmt::Expression { expr } => resolver.resolve_top_expr(expr),
-            _ => panic!("FATAL: Attempting to compile invalid top-level statement, this indicates the parser has failed catasrophically"),
+            Stmt::Expression { ref expr } => resolver.resolve_top_expr(expr),
+            _ => panic!("FATAL: Attempting to compile invalid top-level statement, this indicates a programmer error in the parser has caused a catasrophic crash"),
+        }
+
+        resolver.globals.add_top_level(stmt)
+    }
+
+    // Resolve function prototypes before bodies, this ensures that function bodies can refer to functions declared later in the file
+    for stmt in function_definitions.iter() {
+        match stmt {
+            Stmt::Function { prototype, body: _, is_anon: _ } => resolver.resolve_function_prototype(prototype),
+            _ => panic!("FATAL: Attempting to resolve non function as a function, this indicates a programmer error in the parser has caused a catasrophic crash"),
         }
     }
-    resolver.globals.set_top_level(top_level_stmts);
 
-    // Resolve functions
+    // Resolve function bodies
     for stmt in function_definitions.into_iter() {
         match stmt {
-            Stmt::Function { .. } => resolver.resolve_function(stmt),
-            _ => panic!("FATAL: Attempting to resolve non function as a function, this indicates the parser has failed catasrophically"),
+            Stmt::Function { .. } => resolver.resolve_function_body(stmt),
+            _ => panic!("FATAL: Attempting to resolve non function as a function, this indicates a programmer error in the parser has caused a catasrophic crash"),
         }
     }
 
@@ -265,27 +409,27 @@ pub fn resolve<'ctx>(top_level: Vec<Stmt>) -> Result<(Globals<'ctx>, HashMap<Str
 
 /// Contains all state for resolving a file.
 struct Resolver<'ctx> {
-    functions: HashMap<String, Function<'ctx>>,
     globals: Globals<'ctx>,
     errors: Vec<String>,
+    functions: HashMap<String, Function<'ctx>>
 }
 
 impl<'ctx> Resolver<'ctx> {
     /// Add global declarations to global scope and ensure they are not redefined.
     /// 
     /// **Arguments:**
-    /// - `state` - The current [ResolverState].
     /// - `expr` - The top level expression to evaluate.
     /// 
     /// **Panics:**
     /// 
     /// When the resolver tries to resolve a top level statement that is not a variable declaration, this should never happen as long as the parser works correctly.
+    /// If this method panics its because of a programmer error in the parser.
     fn resolve_top_expr(&mut self, expr: &Expr) {
         trace_resolver!("Resolving top-level expression: {}", expr);
         match expr {
             Expr::VarDeclar { variable, body } => {
                 // Ensure global is unqiue
-                if self.globals.get_global(variable).is_some() {
+                if self.globals.contains_global(variable) {
                     self.errors.push(format!("Global: {} is already defined", variable));
                     return;
                 }
@@ -293,10 +437,10 @@ impl<'ctx> Resolver<'ctx> {
                 // Ensure the global body is valid
                 self.resolve_global_body(body);
 
-                let variable_val = Variable { scope_location: None, pointer_value: None};
+                let variable_val = Rc::from(RefCell::from(Variable::new()));
                 self.globals.set_global(variable.to_string(), variable_val);
             },
-            _ => panic!("FATAL: Attempting to resolve invalid top-level statement, this indicates the parser has failed catasrophically")
+            _ => panic!("FATAL: Attempting to resolve invalid top-level statement, this indicates a programmer error in the parser has caused a catasrophic crash")
         }
     }
 
@@ -310,14 +454,28 @@ impl<'ctx> Resolver<'ctx> {
                 self.resolve_global_body(right)
             },
             Expr::Unary { op: _, right } => self.resolve_global_body(right),
-            Expr::Call { fn_name: _, args: _ } => self.errors.push("Cannot initalise global with a function call".to_string()),
+            Expr::Call { function_name: _, args: _ } => self.errors.push("Cannot initalise global with a function call".to_string()),
             Expr::Number(_) => {},
             Expr::Variable(_) => self.errors.push("Global body must be static".to_string()),
-            Expr::Null => panic!("FATAL: Attempting to resolve null expression, this indicates the parser has failed catasrophically"),
-            Expr::VarDeclar { variable: _, body: _ } => panic!("FATAL: Attempting to resolve var declar in a global declaration, this indicates the parser has failed catastrophically"),
+            Expr::Null => panic!("FATAL: Attempting to resolve null expression, this indicates a programmer error in the parser has caused a catasrophic crash"),
+            Expr::VarDeclar { variable: _, body: _ } => panic!("FATAL: Attempting to resolve var declar in a global declaration, this indicates a programmer error in the parser has caused a catasrophic crash"),
         }
     }
 
+    /// Resolve a function prototype, ensuring it hasn't already been declared and adding it to global function scope.
+    /// 
+    /// **Arguments:**
+    /// - `function` - The function statement to resolve.
+    fn resolve_function_prototype(&mut self, prototype: &Stmt) {
+        let name = match prototype {
+            Stmt::Prototype { name, args: _ } => name,
+            _ => panic!("FATAL: Attempting to resolve non-prototype statement whilst resolving function, this indicates a programmer error in the parser has caused a catasrophic crash")
+        };
+
+        // Ensure function hasn't already been declared
+        if self.globals.contains_function_pointer(name) { self.errors.push("Duplicate function: ".to_string() + name) }
+        self.globals.add_function(name.clone());
+    }
 
     /// Resolve function declarations and add to map of functions.
     /// 
@@ -328,36 +486,38 @@ impl<'ctx> Resolver<'ctx> {
     /// **Panics:**
     /// 
     /// When the resolver tries to resolve a top level statement that is not a function declaration, this should never happen as long as the parser works correctly.
-    fn resolve_function(&mut self, function: Stmt) {
+    /// If this method panics its because of a programmer error in the parser.
+    fn resolve_function_body(&mut self, function: Stmt) {
         trace_resolver!("Resolving function: {}", function);
         let (prototype, body) = match function {
             Stmt::Function { prototype, body, is_anon: _ } => (*prototype, body),
-            _ => panic!("FATAL: Attempting to resolve non-function statement whilst resolving function, this indicates the parser has failed catasrophically")
+            _ => panic!("FATAL: Attempting to resolve non-function statement whilst resolving function, this indicates a programmer error in the parser has caused a catasrophic crash")
         };
 
         let (name, args) = match prototype {
             Stmt::Prototype { name, args } => (name, args),
-            _ => panic!("FATAL: Attempting to resolve non-prototype statement whilst resolving function, this indicates the parser has failed catasrophically")
+            _ => panic!("FATAL: Attempting to resolve non-prototype statement whilst resolving function, this indicates a programmer error in the parser has caused a catasrophic crash")
         };
 
         // Add function arguments to a scope
         trace_resolver!("Adding function arguments to scope");
         let mut args_scope = Scope::new();
-        args_scope.parent = Some(self.globals.scope.clone());
+        args_scope.set_parent(self.globals.scope.clone());
 
         for arg in args {
             trace_resolver!("Adding argument: {}", arg);
-            let variable = Variable { scope_location: None, pointer_value: None };
+            let variable = Rc::from(RefCell::from(Variable::new()));
             if args_scope.set_variable(arg.clone(), variable).is_some() {
                 self.errors.push("Duplicate argument: ".to_string() + &arg);
             }
         }
+
         let args = Rc::from(RefCell::from(args_scope));
 
         // Run through the body of the function and add variables to scope
         trace_resolver!("Resolving function body");
         let mut scope = Scope::new();
-        scope.parent = Some(args.clone());
+        scope.set_parent(args.clone());
         let scope = Rc::from(RefCell::from(scope));
 
         let mut resolved_body = Vec::new();
@@ -365,7 +525,7 @@ impl<'ctx> Resolver<'ctx> {
             resolved_body.push(self.resolve_stmt(scope.clone(), stmt));
         }
 
-        let function = Function { name: name.clone(), args, body: resolved_body, scope };
+        let function = Function { args, body: resolved_body, scope };
         self.functions.insert(name, function);
     }
 
@@ -388,7 +548,7 @@ impl<'ctx> Resolver<'ctx> {
             },
             Stmt::For { start, condition, step, body } => {
                 let mut for_scope = Scope::new();
-                for_scope.parent = Some(scope);
+                for_scope.set_parent(scope);
                 let for_scope = Rc::from(RefCell::from(for_scope));
 
                 self.resolve_expr(for_scope.clone(), &start);
@@ -406,11 +566,11 @@ impl<'ctx> Resolver<'ctx> {
                 self.resolve_expr(scope.clone(), &cond);
 
                 let mut then_scope = Scope::new();
-                then_scope.parent = Some(scope.clone());
+                then_scope.set_parent(scope.clone());
                 let then_scope = Rc::from(RefCell::from(then_scope));
 
                 let mut otherwise_scope = Scope::new();
-                otherwise_scope.parent = Some(scope);
+                otherwise_scope.set_parent(scope);
                 let otherwise_scope = Rc::from(RefCell::from(otherwise_scope));
 
                 let mut resolved_then = Vec::new();
@@ -425,7 +585,7 @@ impl<'ctx> Resolver<'ctx> {
 
                 Statement::Conditional { cond, then: resolved_then, otherwise: resolved_otherwise, then_scope, otherwise_scope }
             },
-            _ => panic!("FATAL: Attempting to resolve function statement in local scope, this indicates the parser has failed catasrophically")
+            _ => panic!("FATAL: Attempting to resolve function statement in local scope, this indicates a programmer error in the parser has caused a catasrophic crash")
         }
     }
 
@@ -435,12 +595,12 @@ impl<'ctx> Resolver<'ctx> {
     /// - `scope` - The scope the expression is in.
     /// - `expr` - The expression to resolve.
     /// - `errors` - Vector of errors to add to.
-    fn resolve_expr(&mut self, scope: Rc<RefCell<Scope>>, expr: &Expr) {
+    fn resolve_expr(&mut self, scope: Rc<RefCell<Scope<'ctx>>>, expr: &Expr) {
         trace_resolver!("Resolving expression: {}", expr);
         match expr {
             Expr::VarDeclar { variable, body } => {
                 self.resolve_expr(scope.clone(), body);
-                let variable_val = Variable { scope_location: None, pointer_value: None };
+                let variable_val = Rc::from(RefCell::from(Variable::new()));
                 scope.borrow_mut().set_variable(variable.to_string(), variable_val);
             },
             Expr::VarAssign { variable, body } => {
@@ -452,10 +612,22 @@ impl<'ctx> Resolver<'ctx> {
                 self.resolve_expr(scope, right);
             },
             Expr::Unary { op: _, right } => self.resolve_expr(scope, right),
-            Expr::Call { fn_name: _, args } => for arg in args { self.resolve_expr(scope.clone(), arg) },
+            Expr::Call { function_name, args } => {
+                // Set the local to point to the global function
+                if !self.globals.contains_function_pointer(function_name) {
+                    self.errors.push(format!("Function: '{}' is not declared", function_name))
+                } else {
+                    let function = self.globals.get_function(function_name);
+                    scope.borrow_mut().add_function(function_name.to_string(), function);
+                }
+
+                for arg in args {
+                    self.resolve_expr(scope.clone(), arg)
+                } 
+            },
             Expr::Number(_) => {},
             Expr::Variable(name) => self.resolve_variable(scope, name),
-            Expr::Null => panic!("FATAL: Attempting to resolve null expression, this indicates the parser has failed catasrophically")
+            Expr::Null => panic!("FATAL: Attempting to resolve null expression, this indicates a programmer error in the parser has caused a catasrophic crash")
         }
     }
 
@@ -469,19 +641,13 @@ impl<'ctx> Resolver<'ctx> {
         trace_resolver!("Resolving variable: {}", name);
 
         // If the variable has been declared already in the local scope, nothing needs to be done
-        if scope.borrow_mut().get_variable(name).is_some() { return; }
+        if scope.borrow_mut().contains_variable(name) { return; }
 
         // Move up scopes, looking for the variable
         let mut higher_scope = scope.borrow().get_parent();
         while let Some(cur_scope) = higher_scope {
-            if let Some(up_scope) = cur_scope.borrow().get_variable(name) {
-                if up_scope.scope_location.is_some() {
-                    scope.borrow_mut().variables.insert(name.to_string(), up_scope.clone());
-                } else {
-                    let variable = Variable { scope_location: Some(cur_scope.clone()), pointer_value: None };
-                    scope.borrow_mut().variables.insert(name.to_string(), variable);
-                }
-
+            if cur_scope.borrow().contains_variable(name) {
+                scope.borrow_mut().set_up_value(name.to_string(), cur_scope.borrow().get_variable(name));
                 return;
             }
 
@@ -516,16 +682,16 @@ mod tests {
     }
 
     #[test]
+    fn function_definition() {
+        let (_ , functions) = run("fun main() {}");
+        assert!(functions.contains_key("main"))
+    }
+
+    #[test]
     fn use_global_definition() {
         let (_, functions) = run("global var x = 5; fun main() { x; }");
         let function = functions.get("main").unwrap();
         assert!(function.scope.borrow().contains_variable("x"))
-    }
-
-    #[test]
-    fn function_definition() {
-        let (_, functions) = run("fun main() {}");
-        assert!(functions.contains_key("main"))
     }
 
     #[test]
@@ -625,6 +791,32 @@ mod tests {
     fn global_variable_val() {
         let err = run_err("global var y = 1; global var x = y + 1; fun main() {}");
         assert_eq!(vec!["Global body must be static"], err)
+    }
+
+    #[test]
+    fn function_already_defined() {
+        let err = run_err("fun main() {} fun main() {}");
+        assert_eq!(vec!["Duplicate function: main"], err)
+    }
+
+    #[test]
+    fn function_call_non_existent() {
+        let err = run_err("fun main() { test(); }");
+        assert_eq!(vec!["Function: 'test' is not declared"], err)
+    }
+
+    #[test]
+    fn function_call() {
+        let (_, functions) = run("fun test() {} fun main() { test(); }");
+        let function = functions.get("main").unwrap();
+        assert!(function.scope.borrow().contains_function("test"));
+    }
+
+    #[test]
+    fn recursive_function_call() {
+        let (_, functions) = run("fun main() { main(); }");
+        let function = functions.get("main").unwrap();
+        assert!(function.scope.borrow().contains_function("main"));
     }
 
     // TODO: When nested bodies are added, test them

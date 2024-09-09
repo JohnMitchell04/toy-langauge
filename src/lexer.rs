@@ -15,7 +15,6 @@ macro_rules! trace_lexer {
 
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::upper_case_acronyms)]
-// TODO: At some point change tokens to hold references to the source code, this will require an extensive lifetimes rework however
 pub enum Token {
     // Single character tokens
     Comma, Semicolon, LParen, RParen, LBrace, RBrace,
@@ -24,7 +23,7 @@ pub enum Token {
     Fun, Extern, For, If, Else, Unary, Binary, Var, Global,
 
     // User data
-    Comment, Ident(String), Number(f64), Op(char),
+    Ident(String), Number(f64), Op(char),
 
     EOF,
 }
@@ -56,7 +55,6 @@ impl Display for Token {
             Self::Binary => write!(f, "binary"),
             Self::Var => write!(f, "var"),
             Self::Global => write!(f, "global"),
-            Self::Comment => write!(f, "Comment"),
             Self::Ident(ident) => write!(f, "Identifier: {}", ident),
             Self::Number(num) => write!(f, "Number: {}", &num.to_string()),
             Self::Op(op) => write!(f, "Operator: {}", &op.to_string()),
@@ -125,7 +123,9 @@ impl<'a> Lexer<'a> {
             Some(')') => Ok(Token::RParen),
             Some('{') => Ok(Token::LBrace),
             Some('}') => Ok(Token::RBrace),
-            Some('/') => Ok(self.potential_comment()),
+            Some('/') => {
+                if let Some(token) = self.potential_comment() { Ok(token) } else { self.next_token() }
+            },
             Some('0'..='9') => self.parse_number(),
             Some('a'..='z' | 'A'..='Z' | '_') => self.parse_ident(),
             Some('+' | '-' | '<' | '>' | '*' | '=' | '!') => Ok(Token::Op(character.unwrap())),
@@ -222,7 +222,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Parse a potential comment.
-    fn potential_comment(&mut self) -> Token {
+    fn potential_comment(&mut self) -> Option<Token> {
         if let Some('/') = self.chars.peek() {
             trace_lexer!("Consuming comment");
             loop {
@@ -234,10 +234,9 @@ impl<'a> Lexer<'a> {
 
             self.col = 1;
             self.line += 1;
-
-            Token::Comment
+            None
         } else {
-            Token::Op('/')
+            Some(Token::Op('/'))
         }
     }
 
@@ -287,7 +286,7 @@ mod tests {
     #[test]
     fn comment() {
         let output = create_lexer("// this is a comment");
-        assert_eq!(vec![Token::Comment, Token::EOF], output)
+        assert_eq!(vec![Token::EOF], output)
     }
 
     #[test]
