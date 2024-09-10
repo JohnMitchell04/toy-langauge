@@ -223,6 +223,9 @@ pub enum Statement<'ctx> {
         body: Vec<Statement<'ctx>>,
         scope: Rc<RefCell<Scope<'ctx>>>,
     },
+    Return {
+        body: Expr,
+    },
     Expression {
         expr: Expr,
     }
@@ -525,6 +528,11 @@ impl<'ctx> Resolver<'ctx> {
             resolved_body.push(self.resolve_stmt(scope.clone(), stmt));
         }
 
+        match resolved_body.last() {
+            Some(Statement::Return { .. }) => {},
+            _ => self.errors.push("Function must have return statement at end".to_string()),
+        }
+
         let function = Function { args, body: resolved_body, scope };
         self.functions.insert(name, function);
     }
@@ -585,6 +593,10 @@ impl<'ctx> Resolver<'ctx> {
 
                 Statement::Conditional { cond, then: resolved_then, otherwise: resolved_otherwise, then_scope, otherwise_scope }
             },
+            Stmt::Return { body } => {
+                // TODO: Ensure if there are multiple returns in a function that their types match
+                Statement::Return { body: *body }
+            }
             _ => panic!("FATAL: Attempting to resolve function statement in local scope, this indicates a programmer error in the parser has caused a catasrophic crash")
         }
     }

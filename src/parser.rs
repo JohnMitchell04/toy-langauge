@@ -130,6 +130,9 @@ pub enum Stmt {
         body: Vec<Stmt>,
         is_anon: bool,
     },
+    Return {
+        body: Box<Expr>,
+    },
     Expression {
         expr: Expr
     }
@@ -145,6 +148,7 @@ impl Display for Stmt {
                 let body = if !body.is_empty() { body.iter().join(",") } else { "".to_string() };
                 write!(f, "{}: {{{}}}", prototype, body)
             },
+            Self::Return { body } => write!(f, "return {}", body),
             Self::Expression { expr } => write!(f, "{}", expr),
         }
     }
@@ -323,12 +327,14 @@ impl<'a> Parser<'a> {
     /// | <[Conditional](Self::parse_conditional_stmt)>
     /// | <[For](Self::parse_for_stmt)>
     /// | <[Var](Self::parse_var_stmt)>
+    /// | <[Return](Self::parse_return_stmt)>
     fn parse_stmt(&mut self) -> Stmt {
         trace_parser!("Parsing statement");
         match self.peek() {
             Ok(Token::If) => self.parse_conditional_stmt(),
             Ok(Token::For) => self.parse_for_stmt(),
             Ok(Token::Var) => self.parse_var_stmt(),
+            Ok(Token::Return) => self.parse_return_stmt(),
             Ok(_) => self.parse_expr_stmt(),
             Err(ref err) => {
                 let message = err.error_message();
@@ -369,7 +375,7 @@ impl<'a> Parser<'a> {
     /// 
     /// **Conditional** ::= 'if' '(' <[Expression](Self::parse_expr)> ')' <[Body](Self::parse_body)> ('else' <[Body](Self::parse_body)>)?
     fn parse_conditional_stmt(&mut self) -> Stmt {
-        trace_parser!("Parsing conditional expression");
+        trace_parser!("Parsing conditional statement");
         _ = self.next();
 
         match_no_error!(self, Token::LParen, "Expected '(' after 'if' keyword");
@@ -403,11 +409,11 @@ impl<'a> Parser<'a> {
     // TODO: Make fields optional
     // TODO: Allow the user to use any expression as an initialiser so they can declare a variable or do something to another variable
     // TODO: Restrict the conditional to only expressions that produce a boolean
-    /// Parse a for expression.
+    /// Parse a for statement.
     /// 
     /// **For** ::= 'for' '(' <[Var](Self::parse_var_stmt)> ';' <[Expression](Self::parse_expr)> ';' <[Expression](Self::parse_expr)> ')' '{' <[Body](Self::parse_body)> '}'
     fn parse_for_stmt(&mut self) -> Stmt {
-        trace_parser!("Parsing for expression");
+        trace_parser!("Parsing for statement");
         _ = self.next();
 
         match_no_error!(self, Token::LParen, "Expected '(' after for");
@@ -431,11 +437,11 @@ impl<'a> Parser<'a> {
     }
 
     // TODO: Allow multiple assignments and definitions without assignment
-    /// Parse a var expression.
+    /// Parse a var statement.
     /// 
     /// **Var** ::= 'var' <[Ident](Token::Ident)> '=' <[Expression](Self::parse_expr)> ';'
     fn parse_var_stmt(&mut self) -> Stmt {
-        trace_parser!("Parsing var expression");
+        trace_parser!("Parsing var statement");
         _ = self.next();
 
         let variable = match self.peek() {
@@ -451,6 +457,29 @@ impl<'a> Parser<'a> {
         match_no_error!(self, Token::Semicolon, "Expected ';' after assignment");
 
         Stmt::Expression { expr: Expr::VarDeclar { variable, body } }
+    }
+
+    /// Parse a return statment.
+    /// 
+    /// **Return** ::= 'return' <[Expression](Self::parse_expr)>? ';'
+    fn parse_return_stmt(&mut self) -> Stmt {
+        trace_parser!("Parsing return statement");
+        _ = self.next();
+
+        let body = if let Ok(Token::Semicolon) = self.peek() {
+            Box::new(Expr::Null)
+        } else {
+            Box::new(self.parse_expr())
+        };
+
+        match_no_error!(self, Token::Semicolon, "Expected ';' after return statement");
+
+        match self.peek() {
+            Ok(Token::RBrace) => {},
+            _ => self.errors.push("Dead code after return statement".to_string()),
+        }
+
+        Stmt::Return { body }
     }
 
     // TODO: Try and find a better system for handling brackets, including mismatched ones
@@ -620,7 +649,7 @@ impl<'a> Parser<'a> {
     }    
 }
 
-// TODO: Add tests for globals and externs
+// TODO: Add tests for externs
 #[cfg(test)]
 mod tests {
     use crate::parser::{Expr, Stmt};
@@ -800,6 +829,18 @@ mod tests {
             ]),
             res[0]
         )
+    }
+
+    #[test]
+    fn return_statement() {
+        let res = parse_no_error("fun test() { return 1; }");
+        assert_eq!(create_function(vec![], vec![Stmt::Return { body: Box::from(Expr::Number(1f64)) }]), res[0])
+    }
+
+    #[test]
+    fn void_return() {
+        let res = parse_no_error("fun test() { return; }");
+        assert_eq!(create_function(vec![], vec![Stmt::Return { body: Box::from(Expr::Null) }]), res[0])
     }
 
     #[test]
@@ -1055,5 +1096,17 @@ mod tests {
     fn invalid_assignment_target() {
         let output = parse_error("fun test() { 1 = 2; }");
         assert_eq!(vec!["Attempting to assign to non-variable"], output)
+    }
+
+    #[test]
+    fn invalid_return() {
+        let output = parse_error("fun test() { return 2 }");
+        assert_eq!(vec!["Expected ';' after return statement"], output)
+    }
+
+    #[test]
+    fn return_dead_code() {
+        let output = parse_error("fun test() { return 2; var x = 1; }");
+        assert_eq!(vec!["Dead code after return statement"], output)
     }
 }

@@ -1,8 +1,10 @@
-use std::{cell::RefCell, collections::HashMap, iter::{self}, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, iter::{self}, path::Path, rc::Rc};
 use inkwell::{
     builder::Builder, context::Context, module::Module, passes::PassBuilderOptions, targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine}, types::BasicMetadataTypeEnum, values::{BasicMetadataValueEnum, BasicValue, FloatValue, FunctionValue, PointerValue}, OptimizationLevel
 };
 use crate::{parser::{parse, Expr, Stmt}, resolver::{resolve, Function, Globals, Scope, Statement, Variable}, trace};
+
+// TODO: Documemt module better
 
 macro_rules! trace_compiler {
     ($($arg:tt)*) => {
@@ -167,12 +169,7 @@ impl<'ctx> Compiler<'ctx> {
                 self.compile_stmt(function_val, stmt, &mut function.scope.borrow_mut());
             }
 
-            // TODO: Needs to be reworked when types and return statements are added
-            self.builder.position_at_end(function_val.get_last_basic_block().unwrap());
-            let return_type = self.context.f64_type().const_float(0f64);
-            self.builder.build_return(Some(&return_type)).unwrap();
-
-            let _ = self.module.print_to_file("./out.ll");
+            _ = self.module.print_to_file("./out.ll");
             
             if !function_val.verify(true) { return Err("Failed to verify function".to_string()) }
         }
@@ -198,6 +195,7 @@ impl<'ctx> Compiler<'ctx> {
         match statement {
             Statement::Conditional { .. } => self.compile_conditional(parent, statement, scope),
             Statement::For { .. } => self.compile_for(parent, statement),
+            Statement::Return { body } => self.compile_return(parent, body, scope),
             Statement::Expression { expr } => _ = self.compile_expr(parent, expr, scope),
         }
     }
@@ -210,9 +208,8 @@ impl<'ctx> Compiler<'ctx> {
             panic!("FATAL: The compiler has called conditional on a non-conditional statement, this indicates a programmer error in the compiler has caused a catasrophic crash")
         };
 
-        self.builder.position_at_end(parent.get_last_basic_block().unwrap());
+        self.builder.position_at_end(self.builder.get_insert_block().unwrap());
 
-        // NOTE: May want to have a specified label i.e. ifcond
         // TODO: When boolean types are added rework this
         // Compile conditional
         let cond = self.compile_expr(parent, cond, scope);
@@ -227,29 +224,40 @@ impl<'ctx> Compiler<'ctx> {
         // Build then body
         self.builder.position_at_end(then_bb);
 
+        // TODO: None of these work for nested conditions
+
+        let mut return_stmt = false;
         for stmt in then {
-            self.compile_stmt(parent, stmt, &mut then_scope.borrow_mut())
+            self.compile_stmt(parent, stmt, &mut then_scope.borrow_mut());
+            
+            // Reset position in case lower statements have created new blocks
+            // self.builder.position_at_end(then_bb);
+            if let Statement::Return { .. } = stmt { return_stmt = true; }
         }
 
-        self.builder.build_unconditional_branch(cont_bb).unwrap();
-        let then_bb = self.builder.get_insert_block().unwrap();
-        let then_val = self.context.f64_type().const_float(0f64);
+        if !return_stmt {
+            self.builder.build_unconditional_branch(cont_bb).unwrap();
+        }
 
         // Build otherwise body
         self.builder.position_at_end(otherwise_bb);
 
+        return_stmt = false;
         for stmt in otherwise {
-            self.compile_stmt(parent, stmt, &mut otherwise_scope.borrow_mut())
+            self.compile_stmt(parent, stmt, &mut otherwise_scope.borrow_mut());
+
+            // Reset position in case lower statements have created new blocks
+            // self.builder.position_at_end(otherwise_bb);
+            if let Statement::Return { .. } = stmt { return_stmt = true; }
         }
 
-        self.builder.build_unconditional_branch(cont_bb).unwrap();
-        let otherwise_bb = self.builder.get_insert_block().unwrap();
-        let otherwise_val = self.context.f64_type().const_float(0f64);
+        if !return_stmt {
+            self.builder.build_unconditional_branch(cont_bb).unwrap();
+        }
 
-        // Build the phi for the if statement
+        // TODO: To deal with returns from either block, we will do a check if either block has a return statement, if they do, we compare iftmp to then and otherwise
+        // create a branch with two blocks, move to one depending on if the values are equal and place a singular return statement there, the other is the continuation
         self.builder.position_at_end(cont_bb);
-        let phi = self.builder.build_phi(self.context.f64_type(), "iftmp").unwrap();
-        phi.add_incoming(&[(&then_val, then_bb), (&otherwise_val, otherwise_bb)]);
     }
 
     fn compile_for(&self, parent: FunctionValue, statement: &Statement<'ctx>) {
@@ -283,6 +291,11 @@ impl<'ctx> Compiler<'ctx> {
 
         self.builder.build_conditional_branch(end_cond, loop_bb, after_bb).unwrap();
         self.builder.position_at_end(after_bb);
+    }
+
+    fn compile_return(&self, parent: FunctionValue, body: &Expr, scope: &mut Scope<'ctx>) {
+        // TODO: This will need fixing when void returns are properly added
+        self.builder.build_return(Some(&self.compile_expr(parent, body, scope))).unwrap();
     }
 
     // TODO: Re-work this and all called functions when types are added

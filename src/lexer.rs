@@ -20,7 +20,7 @@ pub enum Token {
     Comma, Semicolon, LParen, RParen, LBrace, RBrace,
 
     // Keywords
-    Fun, Extern, For, If, Else, Unary, Binary, Var, Global,
+    Fun, Extern, For, If, Else, Unary, Binary, Var, Global, Return,
 
     // User data
     Ident(String), Number(f64), Op(char),
@@ -55,6 +55,7 @@ impl Display for Token {
             Self::Binary => write!(f, "binary"),
             Self::Var => write!(f, "var"),
             Self::Global => write!(f, "global"),
+            Self::Return => write!(f, "return"),
             Self::Ident(ident) => write!(f, "Identifier: {}", ident),
             Self::Number(num) => write!(f, "Number: {}", &num.to_string()),
             Self::Op(op) => write!(f, "Operator: {}", &op.to_string()),
@@ -183,6 +184,7 @@ impl<'a> Lexer<'a> {
             "binary" => Ok(Token::Binary),
             "var" => Ok(Token::Var),
             "global" => Ok(Token::Global),
+            "return" => Ok(Token::Return),
             ident => Ok(Token::Ident(ident.to_string())),
         }
     }
