@@ -528,10 +528,8 @@ impl<'ctx> Resolver<'ctx> {
             resolved_body.push(self.resolve_stmt(scope.clone(), stmt));
         }
 
-        match resolved_body.last() {
-            Some(Statement::Return { .. }) => {},
-            _ => self.errors.push("Function must have return statement at end".to_string()),
-        }
+        let res = self.resolve_returns(&resolved_body);
+        if !res { self.errors.push("All branches of a function must return".to_string()) }
 
         let function = Function { args, body: resolved_body, scope };
         self.functions.insert(name, function);
@@ -594,7 +592,7 @@ impl<'ctx> Resolver<'ctx> {
                 Statement::Conditional { cond, then: resolved_then, otherwise: resolved_otherwise, then_scope, otherwise_scope }
             },
             Stmt::Return { body } => {
-                // TODO: Ensure if there are multiple returns in a function that their types match
+                self.resolve_expr(scope, &body);
                 Statement::Return { body: *body }
             }
             _ => panic!("FATAL: Attempting to resolve function statement in local scope, this indicates a programmer error in the parser has caused a catasrophic crash")
@@ -639,7 +637,8 @@ impl<'ctx> Resolver<'ctx> {
             },
             Expr::Number(_) => {},
             Expr::Variable(name) => self.resolve_variable(scope, name),
-            Expr::Null => panic!("FATAL: Attempting to resolve null expression, this indicates a programmer error in the parser has caused a catasrophic crash")
+            // TODO: Put out a void type when types are added
+            Expr::Null => {},
         }
     }
 
@@ -668,7 +667,40 @@ impl<'ctx> Resolver<'ctx> {
 
         // The variable was not found anywhere
         self.errors.push("Could not find variable: ".to_string() + name)
-}
+    }
+
+    /// Ensure all return statements in a function are valid, returns true if there is a return statement in the body
+    fn resolve_returns(&mut self, statements: &[Statement]) -> bool {
+        // TODO: Ensure if there are multiple returns in a function that their types match
+        for (index, stmt) in statements.iter().enumerate() {
+            match stmt {
+                Statement::Return { .. } => { 
+                    if index != statements.len() - 1 { self.errors.push("Unreachable code".to_string())} 
+                    return true;
+                },
+                Statement::Conditional { then, otherwise, .. } => {
+                    let mut res = self.resolve_returns(then);
+                    res = res && self.resolve_returns(otherwise);
+
+                    if res {
+                        if index != statements.len() - 1 { self.errors.push("Unreachable code".to_string()) }
+                        return res;
+                    }
+                },
+                Statement::For { body, .. } => {
+                    let res = self.resolve_returns(body);
+
+                    if res {
+                        if index != statements.len() - 1 { self.errors.push("Unreachable code".to_string()) }
+                        return res;
+                    }
+                },
+                _ => if index == statements.len() - 1 { return false },
+            }
+        }
+
+        false
+    }
 }
 
 #[cfg(test)]
@@ -689,79 +721,86 @@ mod tests {
 
     #[test]
     fn global_defintion() {
-        let (globals, _) = run("global var x = 5; fun main() {}");
+        let (globals, _) = run("global var x = 5; fun main() { return; }");
         assert!(globals.contains_global("x"))
     }
 
     #[test]
     fn function_definition() {
-        let (_ , functions) = run("fun main() {}");
+        let (_ , functions) = run("fun main() { return; }");
         assert!(functions.contains_key("main"))
     }
 
     #[test]
     fn use_global_definition() {
-        let (_, functions) = run("global var x = 5; fun main() { x; }");
+        let (_, functions) = run("global var x = 5; fun main() { x; return; }");
+        let function = functions.get("main").unwrap();
+        assert!(function.scope.borrow().contains_variable("x"))
+    }
+
+    #[test]
+    fn use_global_definition_return() {
+        let (_, functions) = run("global var x = 5; fun main() { return x; }");
         let function = functions.get("main").unwrap();
         assert!(function.scope.borrow().contains_variable("x"))
     }
 
     #[test]
     fn undeclared_variable() {
-        let err = run_err("fun main() { var x = y; }");
+        let err = run_err("fun main() { var x = y; return; }");
         assert_eq!(vec!["Could not find variable: y"], err)
     }
 
     #[test]
     fn variable_use_before_declar() {
-        let err = run_err("fun main() { x; var x = 1; }");
+        let err = run_err("fun main() { x; var x = 1; return; }");
         assert_eq!(vec!["Could not find variable: x"], err)
     }
 
     #[test]
     fn variable_use_in_declaration() {
-        let err = run_err("fun main() { var x = x + 1; }");
+        let err = run_err("fun main() { var x = x + 1; return; }");
         assert_eq!(vec!["Could not find variable: x"], err)
     }
 
     #[test]
     fn variable_use_after_declar() {
-        let (_, functions) = run("fun main() { var x = 1; x; }");
+        let (_, functions) = run("fun main() { var x = 1; x; return; }");
         let function = functions.get("main").unwrap();
         assert!(function.scope.borrow().contains_variable("x"))
     }
 
     #[test]
     fn variable_redeclar() {
-        let _ = run("fun main() { var x = 1; var x = 2; }");
+        let _ = run("fun main() { var x = 1; var x = 2; return; }");
     }
 
     #[test]
     fn global_redeclar() {
-        let err = run_err("global var x = 1; global var x = 2; fun main() {}");
+        let err = run_err("global var x = 1; global var x = 2; fun main() { return; }");
         assert_eq!(vec!["Global: x is already defined"], err);
     }
 
     #[test]
     fn arg() {
-        let (_, functions) = run("fun main(x) {}");
+        let (_, functions) = run("fun main(x) { return; }");
         let function = functions.get("main").unwrap();
         assert!(function.args.borrow().contains_variable("x"))
     }
 
     #[test]
     fn duplicate_arg() {
-        let err = run_err("fun main(x, x) {}");
+        let err = run_err("fun main(x, x) {return; }");
         assert_eq!(vec!["Duplicate argument: x"], err)
     }
 
     #[test]
     fn if_statement() {
-        let (_, functions) = run("fun main() { var y = 1; if (y) { var x = y + 1; x; }}");
+        let (_, functions) = run("fun main() { var y = 1; if (y) { var x = y + 1; x; } return; }");
         let function = functions.get("main").unwrap();
         assert!(function.scope.borrow().contains_variable("y"));
 
-        let conditional = function.body.last().unwrap();
+        let conditional = function.body.get(1).unwrap();
         assert!(matches!(conditional, Statement::Conditional { cond: _, then: _, otherwise: _, then_scope: _, otherwise_scope: _ }));
 
         if let Statement::Conditional { cond: _, then: _, otherwise: _, then_scope, otherwise_scope } = conditional {
@@ -773,11 +812,25 @@ mod tests {
 
     #[test]
     fn for_statement() {
-        let (_, functions) = run("fun main() { var y = 1; for (var x = y + 1; x < 3; x = x + 1) { var z = 2; z; } }");
+        let (_, functions) = run("fun main() { for (var x = 1; x < 3; x = x + 1) { var z = 2; z; } return; }");
+        let function = functions.get("main").unwrap();
+
+        let for_statement = function.body.first().unwrap();
+        assert!(matches!(for_statement, Statement::For { start: _, condition: _, step: _, body: _, scope: _ }));
+
+        if let Statement::For { start: _, condition: _, step: _, body: _, scope } = for_statement {
+            assert!(scope.borrow().contains_variable("x"));
+            assert!(scope.borrow().contains_variable("z"));
+        }
+    }
+
+    #[test]
+    fn for_initialiser_statement() {
+        let (_, functions) = run("fun main() { var y = 1; for (var x = y + 1; x < 3; x = x + 1) { var z = 2; z; } return; }");
         let function = functions.get("main").unwrap();
         assert!(function.scope.borrow().contains_variable("y"));
 
-        let for_statement = function.body.last().unwrap();
+        let for_statement = function.body.get(1).unwrap();
         assert!(matches!(for_statement, Statement::For { start: _, condition: _, step: _, body: _, scope: _ }));
 
         if let Statement::For { start: _, condition: _, step: _, body: _, scope } = for_statement {
@@ -789,46 +842,86 @@ mod tests {
 
     #[test]
     fn global_call_val() {
-        let err = run_err("global var x = main(); fun main() {}");
+        let err = run_err("global var x = main(); fun main() { return; }");
         assert_eq!(vec!["Cannot initalise global with a function call"], err)
     }
 
     #[test]
     fn global_undeclared_val() {
-        let err = run_err("global var x = y; fun main() {}");
+        let err = run_err("global var x = y; fun main() { return; }");
         assert_eq!(vec!["Global body must be static"], err)
     }
 
     #[test]
     fn global_variable_val() {
-        let err = run_err("global var y = 1; global var x = y + 1; fun main() {}");
+        let err = run_err("global var y = 1; global var x = y + 1; fun main() { return; }");
         assert_eq!(vec!["Global body must be static"], err)
     }
 
     #[test]
     fn function_already_defined() {
-        let err = run_err("fun main() {} fun main() {}");
+        let err = run_err("fun main() { return; } fun main() { return; }");
         assert_eq!(vec!["Duplicate function: main"], err)
     }
 
     #[test]
     fn function_call_non_existent() {
-        let err = run_err("fun main() { test(); }");
+        let err = run_err("fun main() { test(); return; }");
         assert_eq!(vec!["Function: 'test' is not declared"], err)
     }
 
     #[test]
     fn function_call() {
-        let (_, functions) = run("fun test() {} fun main() { test(); }");
+        let (_, functions) = run("fun test() { return; } fun main() { test(); return; }");
         let function = functions.get("main").unwrap();
         assert!(function.scope.borrow().contains_function("test"));
     }
 
     #[test]
     fn recursive_function_call() {
-        let (_, functions) = run("fun main() { main(); }");
+        let (_, functions) = run("fun main() { main(); return; }");
         let function = functions.get("main").unwrap();
         assert!(function.scope.borrow().contains_function("main"));
+    }
+
+    #[test]
+    fn no_return() {
+        let err = run_err("fun main() {}");
+        assert_eq!(vec!["All branches of a function must return"], err)
+    }
+
+    #[test]
+    fn multiple_return() {
+        let _ = run("fun main() { if (1 < 2) { return 1; } else { return 2; } }");
+    }
+
+    #[test]
+    fn multiple_return_following_return() {
+        let err = run_err("fun main() { if (1 < 2) { return 1; } else { return 2; } return 1; }");
+        assert_eq!(vec!["Unreachable code"], err)
+    }
+
+    #[test]
+    fn multiple_return_following_stmt() {
+        let err = run_err("fun main() { if (1 < 2) { return 1; } else { return 2; } var x = 1; }");
+        assert_eq!(vec!["Unreachable code"], err)
+    }
+
+    #[test]
+    fn one_branch_return_following_stmt() {
+        let err = run_err("fun main() { if (1 < 2) { return 1; } var x = 1; }");
+        assert_eq!(vec!["All branches of a function must return"], err)
+    }
+
+    #[test]
+    fn one_branch_return_following_return() {
+        let _ = run("fun main() { if (1 < 2) { return 1; } else { 1; } return; }");
+    }
+
+    #[test]
+    fn one_branch_return() {
+        let err = run_err("fun main() { if (1 < 2) { return 1; } }");
+        assert_eq!(vec!["All branches of a function must return"], err)
     }
 
     // TODO: When nested bodies are added, test them

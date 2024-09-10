@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, iter::{self}, path::Path, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, iter::{self}, rc::Rc};
 use inkwell::{
     builder::Builder, context::Context, module::Module, passes::PassBuilderOptions, targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine}, types::BasicMetadataTypeEnum, values::{BasicMetadataValueEnum, BasicValue, FloatValue, FunctionValue, PointerValue}, OptimizationLevel
 };
@@ -53,7 +53,11 @@ impl<'ctx> Compiler<'ctx> {
         self.compile_globals(&mut globals);
         self.compile_prototypes(&functions, &mut globals);
         self.compile_functions(functions, globals)?;
-        // self.run_optimisations();
+
+        // Don't run optimisations when debugging as it makes it harder for a person to understand the IR
+        if !cfg!(debug_assertions) {
+            self.run_optimisations();
+        }
 
         Ok(self.module)
     }
@@ -217,7 +221,7 @@ impl<'ctx> Compiler<'ctx> {
 
         let then_bb = self.context.append_basic_block(parent, "then");
         let otherwise_bb = self.context.append_basic_block(parent, "else");
-        let cont_bb = self.context.append_basic_block(parent, "ifcont");
+        let mut cont_bb = None;
         self.builder.build_conditional_branch(cond, then_bb, otherwise_bb).unwrap();
 
         // TODO: When types are added and return statements are added, these conditional branches will need looking at
@@ -236,7 +240,8 @@ impl<'ctx> Compiler<'ctx> {
         }
 
         if !return_stmt {
-            self.builder.build_unconditional_branch(cont_bb).unwrap();
+            cont_bb = Some(self.context.append_basic_block(parent, "ifcont"));
+            self.builder.build_unconditional_branch(cont_bb.unwrap()).unwrap();
         }
 
         // Build otherwise body
@@ -252,12 +257,15 @@ impl<'ctx> Compiler<'ctx> {
         }
 
         if !return_stmt {
-            self.builder.build_unconditional_branch(cont_bb).unwrap();
+            if cont_bb.is_none() { cont_bb = Some(self.context.append_basic_block(parent, "ifcont")); }
+            self.builder.build_unconditional_branch(cont_bb.unwrap()).unwrap();
         }
 
         // TODO: To deal with returns from either block, we will do a check if either block has a return statement, if they do, we compare iftmp to then and otherwise
         // create a branch with two blocks, move to one depending on if the values are equal and place a singular return statement there, the other is the continuation
-        self.builder.position_at_end(cont_bb);
+        if let Some(cont) = cont_bb {
+            self.builder.position_at_end(cont);
+        }
     }
 
     fn compile_for(&self, parent: FunctionValue, statement: &Statement<'ctx>) {
@@ -414,5 +422,30 @@ impl<'ctx> Compiler<'ctx> {
         ];
     
         self.module.run_passes(passes.join(",").as_str(), &target_machine, PassBuilderOptions::create()).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use inkwell::context::Context;
+
+    use super::compile;
+
+    #[test]
+    fn test_global() {
+        let context = Context::create();
+        assert!(compile("global var x = 1; fun main() { return x; }", &context).is_ok())
+    }
+
+    #[test]
+    fn test_if() {
+        let context = Context::create();
+        assert!(compile("fun main() { if (1 < 2) { 1; } else { 2; } return 1; }", &context).is_ok())
+    }
+
+    #[test]
+    fn test_if_return() {
+        let context = Context::create();
+        assert!(compile("fun main() { if (1 < 2) { return 1; } else { return 2; } }", &context).is_ok())
     }
 }
