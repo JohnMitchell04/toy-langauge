@@ -126,6 +126,9 @@ fn main() {
         Command::new("clang").arg(ir_path.to_str().unwrap()).output()
     };
 
-    let output = output.expect("Error: Clang failed to compile");
-    println!("{:?}", output);
+    let output = output.expect("Error: Failed to call clang, check if Clang is present");
+    if !output.stderr.is_empty() {
+        println!("Error: Failed to compile with clang: ");
+        print!("{}", String::from_utf8_lossy(&output.stderr));
+    }
 }
