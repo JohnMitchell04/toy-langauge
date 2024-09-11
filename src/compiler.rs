@@ -1,6 +1,6 @@
 use std::{cell::RefCell, collections::HashMap, iter::{self}, rc::Rc};
 use inkwell::{
-    builder::Builder, context::Context, module::Module, passes::PassBuilderOptions, targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine}, types::BasicMetadataTypeEnum, values::{BasicMetadataValueEnum, BasicValue, FloatValue, FunctionValue, PointerValue}, OptimizationLevel
+    builder::Builder, context::Context, module::Module, passes::PassBuilderOptions, targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine}, types::BasicMetadataTypeEnum, values::{BasicMetadataValueEnum, FloatValue, FunctionValue, PointerValue}, OptimizationLevel
 };
 use crate::{parser::{parse, Expr, Stmt}, resolver::{resolve, Function, Globals, Scope, Statement, Variable}};
 
@@ -132,19 +132,11 @@ impl<'ctx> Compiler<'ctx> {
         trace_compiler!("Compiling function prototypes");
         functions.iter().for_each(|(name, function)| {
             // Ensure externs are compiled properly
-            if function.body.is_empty() {
-                // TODO: This needs to be reworked when types are added
-                let args_types: Vec<BasicMetadataTypeEnum> = function.args.borrow().iter().map(|_| self.context.f64_type().into()).collect();
-
-                let function_type = self.context.f64_type().fn_type(args_types.as_slice(), false);
-                globals.set_function_pointer(name, self.module.add_function(name, function_type, None));
-            } else {
-                globals.set_function_pointer(name, self.compile_prototype(name, &mut function.args.borrow_mut()))
-            }
+            globals.set_function_pointer(name, self.compile_prototype(name, &mut function.args.borrow_mut(), function.body.is_empty()));
         });
     }
 
-    fn compile_prototype(&self, name: &str, args: &mut Scope<'ctx>) -> FunctionValue<'ctx> {
+    fn compile_prototype(&self, name: &str, args: &mut Scope<'ctx>, is_extern: bool) -> FunctionValue<'ctx> {
         trace_compiler!("Compiling function prototype");
         let (names, variables): (Vec<String>, Vec<&Rc<RefCell<Variable>>>) = args.iter().map(|(name, variable)| (name.clone(), variable)).unzip();
 
@@ -154,16 +146,18 @@ impl<'ctx> Compiler<'ctx> {
         let function_type = self.context.f64_type().fn_type(args_types.as_slice(), false);
         let function_value = self.module.add_function(name, function_type, None);
 
-        let entry = self.context.append_basic_block(function_value, "entry");
-        self.builder.position_at_end(entry);
+        if !is_extern {
+            let entry = self.context.append_basic_block(function_value, "entry");
+            self.builder.position_at_end(entry);
 
-        for (name, arg) in iter::zip(names, function_value.get_param_iter())  {
-            arg.into_float_value().set_name(name.as_str());
+            for (name, arg) in iter::zip(names, function_value.get_param_iter())  {
+                arg.into_float_value().set_name(name.as_str());
 
-            let alloca = self.build_entry_block_allocation(function_value, &name);
-            self.builder.build_store(alloca, arg).unwrap();
+                let alloca = self.build_entry_block_allocation(function_value, &name);
+                self.builder.build_store(alloca, arg).unwrap();
 
-            args.set_variable_pointer(&name, alloca);
+                args.set_variable_pointer(&name, alloca);
+            }
         }
 
         function_value
@@ -299,7 +293,8 @@ impl<'ctx> Compiler<'ctx> {
         // NOTE: May want to have a specified label i.e. loopcond
         // TODO: When boolean types are added rework this
         // Build the end condition
-        let end_cond = self.compile_expr(parent, condition, &mut scope.borrow_mut()).as_basic_value_enum().into_int_value();
+        let end_cond = self.compile_expr(parent, condition, &mut scope.borrow_mut());
+        let end_cond = self.builder.build_float_to_unsigned_int(end_cond, self.context.bool_type(), "tmpcond").unwrap();
         let after_bb = self.context.append_basic_block(parent, "afterloop");
 
         self.builder.build_conditional_branch(end_cond, loop_bb, after_bb).unwrap();
