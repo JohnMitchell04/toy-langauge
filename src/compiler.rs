@@ -1,6 +1,6 @@
 use std::{cell::RefCell, collections::HashMap, iter::{self}, rc::Rc};
 use inkwell::{
-    builder::Builder, context::Context, module::Module, passes::PassBuilderOptions, targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine}, types::BasicMetadataTypeEnum, values::{BasicMetadataValueEnum, FloatValue, FunctionValue, PointerValue}, OptimizationLevel
+    basic_block::BasicBlock, builder::Builder, context::Context, module::Module, passes::PassBuilderOptions, targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine}, types::BasicMetadataTypeEnum, values::{BasicMetadataValueEnum, FloatValue, FunctionValue, PointerValue}, OptimizationLevel
 };
 use crate::{parser::{parse, Expr, Stmt}, resolver::{resolve, Function, Globals, Scope, Statement, Variable}};
 
@@ -231,39 +231,30 @@ impl<'ctx> Compiler<'ctx> {
         self.builder.build_conditional_branch(cond, then_bb, otherwise_bb).unwrap();
 
         // Build then body
-        self.builder.position_at_end(then_bb);
-
-        let mut body_returns = false;
-        for stmt in then {
-            self.compile_stmt(parent, stmt, &mut then_scope.borrow_mut());
-
-            // Avoid two exits in one basic block
-            if let Statement::Return { .. } = stmt { body_returns = true; }
-            if let Statement::Conditional { returns, .. } = stmt { body_returns = *returns; }
-        }
-
-        if !body_returns {
-            self.builder.build_unconditional_branch(cont_bb.unwrap()).unwrap();
-        }
+        self.compile_conditional_branch(parent, then_bb, cont_bb, then, &mut then_scope.borrow_mut());
 
         // Build otherwise body
-        self.builder.position_at_end(otherwise_bb);
-
-        body_returns = false;
-        for stmt in otherwise {
-            self.compile_stmt(parent, stmt, &mut otherwise_scope.borrow_mut());
-
-            // Avoid two exits in one basic block
-            if let Statement::Return { .. } = stmt { body_returns = true; }
-            if let Statement::Conditional { returns, .. } = stmt { body_returns = *returns; }
-        }
-
-        if !body_returns {
-            self.builder.build_unconditional_branch(cont_bb.unwrap()).unwrap();
-        }
+        self.compile_conditional_branch(parent, otherwise_bb, cont_bb, otherwise, &mut otherwise_scope.borrow_mut());
 
         if let Some(cont) = cont_bb {
             self.builder.position_at_end(cont);
+        }
+    }
+
+    fn compile_conditional_branch(&self, parent: FunctionValue, basic_block: BasicBlock, continuation: Option<BasicBlock>, body: &[Statement<'ctx>], scope: &mut Scope<'ctx>) {
+        self.builder.position_at_end(basic_block);
+
+        let mut body_returns = false;
+        for stmt in body {
+            self.compile_stmt(parent, stmt, scope);
+
+            // Avoid two exits in one basic block
+            if let Statement::Return { .. } = stmt { body_returns = true; }
+            if let Statement::Conditional { returns, .. } = stmt { body_returns = *returns; }
+        }
+
+        if !body_returns {
+            self.builder.build_unconditional_branch(continuation.unwrap()).unwrap();
         }
     }
 
@@ -471,5 +462,11 @@ mod tests {
     fn test_nested_if_following_effect() {
         let context = Context::create();
         assert!(compile("fun main() { var x = 1; if (1 < 2) { 1; } else { if (1 < 2) { 1; } else { 2; } x = 1; } return 1; }", &context).is_ok())
+    }
+
+    #[test]
+    fn test_for() {
+        let context = Context::create();
+        assert!(compile("extern printd(x); fun main() { for (var x = 0; x < 10; x = x + 1) { printd(x); } return 1; }", &context).is_ok())
     }
 }
