@@ -1,6 +1,6 @@
 use clap::Parser;
 use inkwell::context::Context;
-use std::{io::Write, path::PathBuf};
+use std::{io::Write, path::PathBuf, process::Command};
 
 mod lexer;
 mod parser;
@@ -100,15 +100,32 @@ fn main() {
         }
     };
 
-    let output = module.print_to_string();
+    let output = module.print_to_string().to_string();
     if cfg!(debug_assertions) {
-        println!("DEBUG: File compiled to IR: \n{}", output.to_string());
+        println!("DEBUG: File compiled to IR: \n{}", output);
     }
 
-    let mut path = if let Some(folder) = args.output_folder { folder } else { PathBuf::from("./") };
-    if let Some(name) = args.name { path.push(name); path.push(".ll")  } else { path.push("out.ll") };
-    
-    if std::fs::write(path, output.to_string()).is_err() {
-        println!("Error: Could not write IR to file")
+    let base_path = if let Some(folder) = args.output_folder { folder } else { PathBuf::from("./") };
+    if !base_path.exists() {
+        std::fs::create_dir(&base_path).expect("Error: Could not create output directory");
     }
+    
+    // Only write a textual representation of the IR if we are in a debug build
+    let ir_path = base_path.join(module.get_name().to_str().unwrap().to_string() + ".ll");
+    if cfg!(debug_assertions) {
+        std::fs::write(&ir_path, output).expect("Error: Could not write IR to file");
+    } else {
+        module.write_bitcode_to_path(&ir_path);
+    }
+
+    // Compile with clang
+    let clang_path = args.name.map(|name| { base_path.join(name+ ".out") });
+    let output = if let Some(path) = clang_path {
+        Command::new("clang").args([ir_path.to_str().unwrap(), "-o", path.to_str().unwrap()]).output()
+    } else {
+        Command::new("clang").arg(ir_path.to_str().unwrap()).output()
+    };
+
+    let output = output.expect("Error: Clang failed to compile");
+    println!("{:?}", output);
 }
