@@ -209,11 +209,6 @@ impl<'ctx> Scope<'ctx> {
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Rc<RefCell<Variable<'ctx>>>)> {
         self.variables.iter()
     }
-
-    /// Retrieve the number of variables in scope.
-    fn number_variables(&self) -> usize {
-        self.variables.len()
-    }
 }
 
 /// A resolved [Stmt], this differs in that we now have resolved the scopes of the variables referred to in the [Stmt].
@@ -243,6 +238,7 @@ pub enum Statement<'ctx> {
 
 /// A function in the program, contains information about variable scope and all statements contained within it.
 pub struct Function<'ctx> {
+    pub num_args: usize,
     pub args: Rc<RefCell<Scope<'ctx>>>,
     pub body: Vec<Statement<'ctx>>,
     pub scope: Rc<RefCell<Scope<'ctx>>>,
@@ -480,14 +476,18 @@ impl<'ctx> Resolver<'ctx> {
     /// **Arguments:**
     /// - `function` - The function statement to resolve.
     fn resolve_function_prototype(&mut self, prototype: &Stmt) {
-        let name = match prototype {
-            Stmt::Prototype { name, args: _ } => name,
+        let (name, args) = match prototype {
+            Stmt::Prototype { name, args } => (name, args),
             _ => panic!("FATAL: Attempting to resolve non-prototype statement whilst resolving function, this indicates a programmer error in the parser has caused a catasrophic crash")
         };
 
         // Ensure function hasn't already been declared
         if self.globals.contains_function_pointer(name) { self.errors.push("Duplicate function: ".to_string() + name) }
         self.globals.add_function(name.clone());
+
+        // Add a dummy function so that we can still resolve recursive function calls
+        let function = Function { num_args: args.len(), args: Rc::from(RefCell::from(Scope::new())), body: vec![], scope: Rc::from(RefCell::from(Scope::new())) };
+        self.functions.insert(name.clone(), function);
     }
 
     /// Resolve function declarations and add to map of functions.
@@ -526,11 +526,8 @@ impl<'ctx> Resolver<'ctx> {
         }
 
         let args = Rc::from(RefCell::from(args_scope));
-
-        // TODO: Maybe add a number of args field to function so that we can avoid this clone
-        // Add a dummy function so that we can still resolve recursive function calls
-        let function = Function { args: args.clone(), body: vec![], scope: Rc::from(RefCell::from(Scope::new())) };
-        self.functions.insert(name.clone(), function);
+        let fun = self.functions.get_mut(&name).unwrap();
+        fun.args = args.clone();
 
         // Run through the body of the function and add variables to scope
         trace_resolver!("Resolving function body");
@@ -649,9 +646,9 @@ impl<'ctx> Resolver<'ctx> {
                     let function = self.globals.get_function(function_name);
                     scope.borrow_mut().add_function(function_name.to_string(), function);
 
-                    let num_variables = self.functions.get(function_name).unwrap().args.borrow().number_variables();
+                    let num_variables = self.functions.get(function_name).unwrap().num_args;
                     if num_variables != args.len() { 
-                        self.errors.push(format!("Function: {} takes {} variables but only {} supplied", function_name, num_variables, args.len()));
+                        self.errors.push(format!("Function: {} takes {} variables but {} supplied", function_name, num_variables, args.len()));
                     }
                 }
 
@@ -958,7 +955,7 @@ mod tests {
     #[test]
     fn extern_args() {
         let (_, functions) = run("extern printd(x); fun main() { return 1; }");
-        assert_eq!(functions.get("printd").unwrap().args.borrow().number_variables(), 1);
+        assert_eq!(functions.get("printd").unwrap().args.borrow().variables.len(), 1);
     }
 
     #[test]

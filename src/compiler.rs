@@ -469,4 +469,44 @@ mod tests {
         let context = Context::create();
         assert!(compile("extern printd(x); fun main() { for (var x = 0; x < 10; x = x + 1) { printd(x); } return 1; }", &context).is_ok())
     }
+
+    #[test]
+    fn recursive_fib() {
+        let context = Context::create();
+        assert!(compile("
+fun recursive_fib(x) {
+    if (x < 3) {
+        return 1;
+    }
+    else {
+        return recursive_fib(x - 1) + recursive_fib(x - 2);
+    }
+} 
+
+fun main() {
+    return recursive_fib(10);
+}", &context).is_ok())
+    }
+
+    #[test]
+    fn iterative_fib() {
+        let context = Context::create();
+        assert!(compile("
+fun iterative_fib(x) {
+    var a = 1;
+    var b = 1; 
+    var c = 0;
+    for (var i = 3; i < x + 1; i = i + 1) {
+        c = a + b;
+        a = b;
+        b = c;
+    }
+
+    return c;
+}
+    
+fun main() {
+    return iterative_fib(10);
+}", &context).is_ok())
+    }
 }
