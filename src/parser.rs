@@ -130,7 +130,7 @@ pub enum Stmt {
     Function {
         prototype: Box<Stmt>,
         body: Vec<Stmt>,
-        is_anon: bool,
+        is_extern: bool,
     },
     Return {
         body: Box<Expr>,
@@ -146,9 +146,10 @@ impl Display for Stmt {
             Self::Conditional { cond, then, otherwise } => write!(f, "if ({}) {{{}}} else: {{{}}}", cond, then.iter().join(" "), otherwise.iter().join(" ")),
             Self::For { start, condition, step, body } => write!(f, "for ({}; {}; {}) {{{}}}", start, condition, step, body.iter().join(" ")),
             Self::Prototype { name, args } => write!(f, "<fn {}({})>", name, args.iter().join(",")),
-            Self::Function { prototype, body, is_anon: _ } => {
+            Self::Function { prototype, body, is_extern } => {
+                let extern_name = if *is_extern { "extern " } else { "" };
                 let body = if !body.is_empty() { body.iter().join(",") } else { "".to_string() };
-                write!(f, "{}: {{{}}}", prototype, body)
+                write!(f, "{}{}: {{{}}}", extern_name, prototype, body)
             },
             Self::Return { body } => write!(f, "return {}", body),
             Self::Expression { expr } => write!(f, "{}", expr),
@@ -240,13 +241,16 @@ impl<'a> Parser<'a> {
 
     /// Parse an external function.
     /// 
-    /// **Extern** ::= 'extern' <[Prototype](Self::parse_prototype)>
+    /// **Extern** ::= 'extern' <[Prototype](Self::parse_prototype)> ';'
     fn parse_extern(&mut self) -> Stmt {
         trace_parser!("Parsing external");
         _ = self.next();
 
         let prototype = Box::new(self.parse_prototype());
-        Stmt::Function { prototype, body: vec![], is_anon: false}
+
+        match_no_error!(self, Token::Semicolon, "Expected ';' after extern declaration");
+
+        Stmt::Function { prototype, body: vec![], is_extern: true}
     }
 
     /// Parse a function and return a function statement.
@@ -260,7 +264,7 @@ impl<'a> Parser<'a> {
         let prototype = Box::new(self.parse_prototype());
         let body = self.parse_body();
 
-        Stmt::Function { prototype, body, is_anon: false }
+        Stmt::Function { prototype, body, is_extern: false }
     }
 
     // TODO: Extend to operator function declarations and add return types
@@ -651,7 +655,6 @@ impl<'a> Parser<'a> {
     }    
 }
 
-// TODO: Add tests for externs
 #[cfg(test)]
 mod tests {
     use crate::parser::{Expr, Stmt};
@@ -675,7 +678,7 @@ mod tests {
                 args,
             }),
             body, 
-            is_anon: false 
+            is_extern: false 
         }
     }
 
@@ -831,6 +834,12 @@ mod tests {
             ]),
             res[0]
         )
+    }
+
+    #[test]
+    fn extern_declaration() {
+        let res = parse_no_error("extern printd(x);");
+        assert_eq!(Stmt::Function { prototype: Box::from(Stmt::Prototype { name: "printd".to_string(), args: vec!["x".to_string()] }), body: vec![], is_extern: true }, res[0]);
     }
 
     #[test]

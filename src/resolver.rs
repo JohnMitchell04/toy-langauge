@@ -209,6 +209,11 @@ impl<'ctx> Scope<'ctx> {
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Rc<RefCell<Variable<'ctx>>>)> {
         self.variables.iter()
     }
+
+    /// Retrieve the number of variables in scope.
+    fn number_variables(&self) -> usize {
+        self.variables.len()
+    }
 }
 
 /// A resolved [Stmt], this differs in that we now have resolved the scopes of the variables referred to in the [Stmt].
@@ -354,7 +359,7 @@ impl<'ctx> Globals<'ctx> {
     /// In the compiler we know this should be the case because the resolver should have caught it if it is not the case, if a panic ever occurs it is
     /// because of programmer error in the resolver, this should never panic if the source is valid.
     pub fn set_function_pointer(&mut self, name: &str, function_pointer: FunctionValue<'ctx>) {
-        *self.scope.borrow_mut().functions.get_mut(name).expect("FATAL: Function not Declared") = Rc::from(RefCell::from(Some(function_pointer)))
+        *self.scope.borrow_mut().functions.get_mut(name).expect("FATAL: Function not Declared").borrow_mut() = Some(function_pointer)
     }
 
     /// Check whether the function pointer is already scope.
@@ -392,7 +397,7 @@ pub fn resolve<'ctx>(top_level: Vec<Stmt>) -> Result<(Globals<'ctx>, HashMap<Str
     // Resolve function prototypes before bodies, this ensures that function bodies can refer to functions declared later in the file
     for stmt in function_definitions.iter() {
         match stmt {
-            Stmt::Function { prototype, body: _, is_anon: _ } => resolver.resolve_function_prototype(prototype),
+            Stmt::Function { prototype, .. } => resolver.resolve_function_prototype(prototype),
             _ => panic!("FATAL: Attempting to resolve non function as a function, this indicates a programmer error in the parser has caused a catasrophic crash"),
         }
     }
@@ -497,8 +502,8 @@ impl<'ctx> Resolver<'ctx> {
     /// If this method panics its because of a programmer error in the parser.
     fn resolve_function_body(&mut self, function: Stmt) {
         trace_resolver!("Resolving function: {}", function);
-        let (prototype, body) = match function {
-            Stmt::Function { prototype, body, is_anon: _ } => (*prototype, body),
+        let (prototype, body, is_extern) = match function {
+            Stmt::Function { prototype, body, is_extern } => (*prototype, body, is_extern),
             _ => panic!("FATAL: Attempting to resolve non-function statement whilst resolving function, this indicates a programmer error in the parser has caused a catasrophic crash")
         };
 
@@ -522,6 +527,11 @@ impl<'ctx> Resolver<'ctx> {
 
         let args = Rc::from(RefCell::from(args_scope));
 
+        // TODO: Maybe add a number of args field to function so that we can avoid this clone
+        // Add a dummy function so that we can still resolve recursive function calls
+        let function = Function { args: args.clone(), body: vec![], scope: Rc::from(RefCell::from(Scope::new())) };
+        self.functions.insert(name.clone(), function);
+
         // Run through the body of the function and add variables to scope
         trace_resolver!("Resolving function body");
         let mut scope = Scope::new();
@@ -533,11 +543,15 @@ impl<'ctx> Resolver<'ctx> {
             resolved_body.push(self.resolve_stmt(scope.clone(), stmt));
         }
 
-        let res = self.resolve_returns(&mut resolved_body);
-        if !res { self.errors.push("All branches of a function must return".to_string()) }
+        if !is_extern {
+            let res = self.resolve_returns(&mut resolved_body);
+            if !res { self.errors.push("All branches of a function must return".to_string()) }   
+        }
 
-        let function = Function { args, body: resolved_body, scope };
-        self.functions.insert(name, function);
+        // Update dummy function with new values
+        let fun = self.functions.get_mut(&name).unwrap();
+        fun.body = resolved_body;
+        fun.scope = scope;
     }
 
     /// Resolve a statement.
@@ -634,6 +648,11 @@ impl<'ctx> Resolver<'ctx> {
                 } else {
                     let function = self.globals.get_function(function_name);
                     scope.borrow_mut().add_function(function_name.to_string(), function);
+
+                    let num_variables = self.functions.get(function_name).unwrap().args.borrow().number_variables();
+                    if num_variables != args.len() { 
+                        self.errors.push(format!("Function: {} takes {} variables but only {} supplied", function_name, num_variables, args.len()));
+                    }
                 }
 
                 for arg in args {
@@ -928,6 +947,23 @@ mod tests {
     fn one_branch_return() {
         let err = run_err("fun main() { if (1 < 2) { return 1; } }");
         assert_eq!(vec!["All branches of a function must return"], err)
+    }
+
+    #[test]
+    fn extern_declaration() {
+        let (_, functions) = run("extern printd(); fun main() { return 1; }");
+        assert!(functions.contains_key("printd"));
+    }
+
+    #[test]
+    fn extern_args() {
+        let (_, functions) = run("extern printd(x); fun main() { return 1; }");
+        assert_eq!(functions.get("printd").unwrap().args.borrow().number_variables(), 1);
+    }
+
+    #[test]
+    fn extern_use() {
+        let _ = run("extern printd(x); fun main() { var x = 5; printd(x); return 1; }");
     }
 
     // TODO: When nested bodies are added, test them

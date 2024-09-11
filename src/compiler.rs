@@ -130,7 +130,18 @@ impl<'ctx> Compiler<'ctx> {
 
     fn compile_prototypes(&self, functions: &HashMap<String, Function<'ctx>>, globals: &mut Globals<'ctx>) {
         trace_compiler!("Compiling function prototypes");
-        functions.iter().for_each(|(name, function)| globals.set_function_pointer(name, self.compile_prototype(name, &mut function.args.borrow_mut())));
+        functions.iter().for_each(|(name, function)| {
+            // Ensure externs are compiled properly
+            if function.body.is_empty() {
+                // TODO: This needs to be reworked when types are added
+                let args_types: Vec<BasicMetadataTypeEnum> = function.args.borrow().iter().map(|_| self.context.f64_type().into()).collect();
+
+                let function_type = self.context.f64_type().fn_type(args_types.as_slice(), false);
+                globals.set_function_pointer(name, self.module.add_function(name, function_type, None));
+            } else {
+                globals.set_function_pointer(name, self.compile_prototype(name, &mut function.args.borrow_mut()))
+            }
+        });
     }
 
     fn compile_prototype(&self, name: &str, args: &mut Scope<'ctx>) -> FunctionValue<'ctx> {
@@ -162,6 +173,7 @@ impl<'ctx> Compiler<'ctx> {
         trace_compiler!("Compiling functions");
 
         for (name, function) in functions.iter() {
+            // Extern
             if function.body.is_empty() { continue }
 
             // Get the function
