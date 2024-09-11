@@ -206,8 +206,8 @@ impl<'ctx> Compiler<'ctx> {
 
     fn compile_conditional(&self, parent: FunctionValue, statement: &Statement<'ctx>, scope: &mut Scope<'ctx>) {
         trace_compiler!("Compiling conditional statement");
-        let (cond, then, otherwise, then_scope, otherwise_scope) = if let Statement::Conditional { cond, then, otherwise, then_scope, otherwise_scope } = statement {
-            (cond, then, otherwise, then_scope, otherwise_scope)
+        let (cond, then, otherwise, then_scope, otherwise_scope, returns) = if let Statement::Conditional { cond, then, otherwise, then_scope, otherwise_scope, returns } = statement {
+            (cond, then, otherwise, then_scope, otherwise_scope, returns)
         } else {
             panic!("FATAL: The compiler has called conditional on a non-conditional statement, this indicates a programmer error in the compiler has caused a catasrophic crash")
         };
@@ -221,48 +221,41 @@ impl<'ctx> Compiler<'ctx> {
 
         let then_bb = self.context.append_basic_block(parent, "then");
         let otherwise_bb = self.context.append_basic_block(parent, "else");
-        let mut cont_bb = None;
+        let cont_bb = if *returns { None } else { Some(self.context.append_basic_block(parent, "ifcont")) };
         self.builder.build_conditional_branch(cond, then_bb, otherwise_bb).unwrap();
 
-        // TODO: When types are added and return statements are added, these conditional branches will need looking at
         // Build then body
         self.builder.position_at_end(then_bb);
 
-        // TODO: None of these work for nested conditions
-
-        let mut return_stmt = false;
+        let mut body_returns = false;
         for stmt in then {
             self.compile_stmt(parent, stmt, &mut then_scope.borrow_mut());
-            
-            // Reset position in case lower statements have created new blocks
-            // self.builder.position_at_end(then_bb);
-            if let Statement::Return { .. } = stmt { return_stmt = true; }
+
+            // Avoid two exits in one basic block
+            if let Statement::Return { .. } = stmt { body_returns = true; }
+            if let Statement::Conditional { returns, .. } = stmt { body_returns = *returns; }
         }
 
-        if !return_stmt {
-            cont_bb = Some(self.context.append_basic_block(parent, "ifcont"));
+        if !body_returns {
             self.builder.build_unconditional_branch(cont_bb.unwrap()).unwrap();
         }
 
         // Build otherwise body
         self.builder.position_at_end(otherwise_bb);
 
-        return_stmt = false;
+        body_returns = false;
         for stmt in otherwise {
             self.compile_stmt(parent, stmt, &mut otherwise_scope.borrow_mut());
 
-            // Reset position in case lower statements have created new blocks
-            // self.builder.position_at_end(otherwise_bb);
-            if let Statement::Return { .. } = stmt { return_stmt = true; }
+            // Avoid two exits in one basic block
+            if let Statement::Return { .. } = stmt { body_returns = true; }
+            if let Statement::Conditional { returns, .. } = stmt { body_returns = *returns; }
         }
 
-        if !return_stmt {
-            if cont_bb.is_none() { cont_bb = Some(self.context.append_basic_block(parent, "ifcont")); }
+        if !body_returns {
             self.builder.build_unconditional_branch(cont_bb.unwrap()).unwrap();
         }
 
-        // TODO: To deal with returns from either block, we will do a check if either block has a return statement, if they do, we compare iftmp to then and otherwise
-        // create a branch with two blocks, move to one depending on if the values are equal and place a singular return statement there, the other is the continuation
         if let Some(cont) = cont_bb {
             self.builder.position_at_end(cont);
         }
@@ -447,5 +440,29 @@ mod tests {
     fn test_if_return() {
         let context = Context::create();
         assert!(compile("fun main() { if (1 < 2) { return 1; } else { return 2; } }", &context).is_ok())
+    }
+
+    #[test]
+    fn test_if_partial_return() {
+        let context = Context::create();
+        assert!(compile("fun main() { if (1 < 2) { 1; } else { return 2; } return 1; }", &context).is_ok())
+    }
+
+    #[test]
+    fn test_nested_if() {
+        let context = Context::create();
+        assert!(compile("fun main() { if (1 < 2) { 1; } else { if (1 < 2) { return 1; } else { return 2; } } return 1; }", &context).is_ok())
+    }
+
+    #[test]
+    fn test_nested_if_following() {
+        let context = Context::create();
+        assert!(compile("fun main() { if (1 < 2) { 1; } else { if (1 < 2) { 1; } else { 2; } 1; } return 1; }", &context).is_ok())
+    }
+
+    #[test]
+    fn test_nested_if_following_effect() {
+        let context = Context::create();
+        assert!(compile("fun main() { var x = 1; if (1 < 2) { 1; } else { if (1 < 2) { 1; } else { 2; } x = 1; } return 1; }", &context).is_ok())
     }
 }

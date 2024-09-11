@@ -215,6 +215,7 @@ pub enum Statement<'ctx> {
         otherwise: Vec<Statement<'ctx>>,
         then_scope: Rc<RefCell<Scope<'ctx>>>,
         otherwise_scope: Rc<RefCell<Scope<'ctx>>>,
+        returns: bool,
     },
     For {
         start: Expr,
@@ -528,7 +529,7 @@ impl<'ctx> Resolver<'ctx> {
             resolved_body.push(self.resolve_stmt(scope.clone(), stmt));
         }
 
-        let res = self.resolve_returns(&resolved_body);
+        let res = self.resolve_returns(&mut resolved_body);
         if !res { self.errors.push("All branches of a function must return".to_string()) }
 
         let function = Function { args, body: resolved_body, scope };
@@ -589,7 +590,7 @@ impl<'ctx> Resolver<'ctx> {
                     resolved_otherwise.push(self.resolve_stmt(otherwise_scope.clone(), stmt))
                 }
 
-                Statement::Conditional { cond, then: resolved_then, otherwise: resolved_otherwise, then_scope, otherwise_scope }
+                Statement::Conditional { cond, then: resolved_then, otherwise: resolved_otherwise, then_scope, otherwise_scope, returns: false }
             },
             Stmt::Return { body } => {
                 self.resolve_expr(scope, &body);
@@ -670,19 +671,20 @@ impl<'ctx> Resolver<'ctx> {
     }
 
     /// Ensure all return statements in a function are valid, returns true if there is a return statement in the body
-    fn resolve_returns(&mut self, statements: &[Statement]) -> bool {
+    fn resolve_returns(&mut self, statements: &mut [Statement]) -> bool {
         // TODO: Ensure if there are multiple returns in a function that their types match
-        for (index, stmt) in statements.iter().enumerate() {
+        for (index, stmt) in statements.iter_mut().enumerate() {
             match stmt {
                 Statement::Return { .. } => { 
                     if index != statements.len() - 1 { self.errors.push("Unreachable code".to_string())} 
                     return true;
                 },
-                Statement::Conditional { then, otherwise, .. } => {
+                Statement::Conditional { then, otherwise, returns, .. } => {
                     let mut res = self.resolve_returns(then);
                     res = res && self.resolve_returns(otherwise);
 
                     if res {
+                        *returns = true;
                         if index != statements.len() - 1 { self.errors.push("Unreachable code".to_string()) }
                         return res;
                     }
@@ -695,7 +697,7 @@ impl<'ctx> Resolver<'ctx> {
                         return res;
                     }
                 },
-                _ => if index == statements.len() - 1 { return false },
+                _ => {},
             }
         }
 
@@ -801,9 +803,9 @@ mod tests {
         assert!(function.scope.borrow().contains_variable("y"));
 
         let conditional = function.body.get(1).unwrap();
-        assert!(matches!(conditional, Statement::Conditional { cond: _, then: _, otherwise: _, then_scope: _, otherwise_scope: _ }));
+        assert!(matches!(conditional, Statement::Conditional { .. }));
 
-        if let Statement::Conditional { cond: _, then: _, otherwise: _, then_scope, otherwise_scope } = conditional {
+        if let Statement::Conditional { then_scope, otherwise_scope, .. } = conditional {
             assert!(then_scope.borrow().contains_variable("x"));
             assert!(then_scope.borrow().contains_variable("y"));
             assert!(otherwise_scope.borrow().variables.is_empty());
