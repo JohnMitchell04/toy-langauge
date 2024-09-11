@@ -174,8 +174,6 @@ impl<'ctx> Compiler<'ctx> {
             for stmt in function.body.iter() {
                 self.compile_stmt(function_val, stmt, &mut function.scope.borrow_mut());
             }
-
-            _ = self.module.print_to_file("./out.ll");
             
             if !function_val.verify(true) { return Err("Failed to verify function".to_string()) }
         }

@@ -1,34 +1,15 @@
 use clap::Parser;
 use inkwell::context::Context;
-use std::{io::Write, path::PathBuf, process::Command};
+use std::{path::PathBuf, process::Command};
 
 mod lexer;
 mod parser;
 mod resolver;
 mod compiler;
 mod utils;
+mod standard;
 
-// TODO: Move these somewhere elese
-macro_rules! print_flush {
-    ($( $x:expr ),* ) => {
-        print!( $($x, )* );
-        std::io::stdout().flush().expect("Could not flush standard output");
-    };
-}
-
-#[no_mangle]
-pub extern "C" fn putchard(x: f64) -> f64 {
-    print_flush!("{}", x as u8 as char);
-    x
-}
-
-#[no_mangle]
-pub extern "C" fn printd(x: f64) -> f64 {
-    println!("{}", x);
-    x
-}
-
-// TODO: Expand to take multiple paths
+// TODO: Expand to take source files
 /// Define the CLI interface
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -118,17 +99,23 @@ fn main() {
         module.write_bitcode_to_path(&ir_path);
     }
 
-    // Compile with clang
-    let clang_path = args.name.map(|name| { base_path.join(name+ ".out") });
+    // TODO: This is a bad solution that does not work when the source code is not present
+    // Compile the standard library to LLVM IR
+    let standard = base_path.join("standard.lib");
+    let output = Command::new("rustc")
+        .args(["--crate-type=staticlib", "-o", standard.to_str().unwrap(), "./src/standard.rs"])
+        .output().expect("Error: Failed to call rustc, check if rustc is present");
+
+    if !output.stderr.is_empty() { eprintln!("Error: Failed to compile standard library with rustc: {}", String::from_utf8_lossy(&output.stderr)); }
+
+    // Compile to native asm with clang
+    let clang_path = args.name.map(|name| { base_path.join(name + ".out") });
     let output = if let Some(path) = clang_path {
-        Command::new("clang").args([ir_path.to_str().unwrap(), "-o", path.to_str().unwrap()]).output()
+        Command::new("clang").args([ir_path.to_str().unwrap(), "-o", path.to_str().unwrap(), "standard.lib"]).output()
     } else {
-        Command::new("clang").arg(ir_path.to_str().unwrap()).output()
+        Command::new("clang").args([ir_path.to_str().unwrap(), "standard.lib"]).output()
     };
 
     let output = output.expect("Error: Failed to call clang, check if Clang is present");
-    if !output.stderr.is_empty() {
-        println!("Error: Failed to compile with clang: ");
-        print!("{}", String::from_utf8_lossy(&output.stderr));
-    }
+    if !output.stderr.is_empty() { eprintln!("Error: Failed to compile with clang: {}", String::from_utf8_lossy(&output.stderr)); }
 }
