@@ -2,7 +2,10 @@ use std::{cell::RefCell, collections::HashMap, iter::{self}, rc::Rc};
 use inkwell::{
     builder::Builder, context::Context, module::Module, passes::PassBuilderOptions, targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine}, types::BasicMetadataTypeEnum, values::{BasicMetadataValueEnum, BasicValue, FloatValue, FunctionValue, PointerValue}, OptimizationLevel
 };
-use crate::{parser::{parse, Expr, Stmt}, resolver::{resolve, Function, Globals, Scope, Statement, Variable}, trace};
+use crate::{parser::{parse, Expr, Stmt}, resolver::{resolve, Function, Globals, Scope, Statement, Variable}};
+
+#[cfg(debug_assertions)]
+use crate::trace;
 
 // TODO: Documemt module better
 
@@ -30,13 +33,11 @@ pub fn compile<'ctx>(source: &str, context: &'ctx Context) -> Result<Module<'ctx
     // Create necessary LLVM instances
     let builder = context.create_builder();
     let module = context.create_module("main");
+    module.set_triple(&TargetMachine::get_default_triple());
 
     // Parse and resolve the input
     let top_level = parse(source)?;
     let (globals, functions) = resolve(top_level)?;
-
-    // TODO: Run optimisations
-
     let compiler = Compiler { context, builder, module };
     compiler.compile(globals, functions).map_err(|err| vec![err])
 }

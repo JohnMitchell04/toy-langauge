@@ -1,6 +1,9 @@
 use std::{fmt::Display, iter::Peekable};
 use itertools::Itertools;
-use crate::{lexer::{LexResult, Lexer, Token}, trace};
+use crate::lexer::{LexResult, Lexer, Token};
+
+#[cfg(debug_assertions)]
+use crate::trace;
 
 // TODO: Document this module better
 

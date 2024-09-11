@@ -1,6 +1,9 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use inkwell::values::{FunctionValue, GlobalValue, PointerValue};
-use crate::{parser::{Expr, Stmt}, trace};
+use crate::parser::{Expr, Stmt};
+
+#[cfg(debug_assertions)]
+use crate::trace;
 
 macro_rules! trace_resolver {
     ($($arg:tt)*) => {
