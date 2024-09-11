@@ -6,7 +6,8 @@ use crate::{lexer::{LexResult, Lexer, Token}, trace};
 
 macro_rules! trace_parser {
     ($($arg:tt)*) => {
-        if cfg!(debug_assertions) {
+        #[cfg(debug_assertions)]
+        {
             if std::env::var("PARSER_TRACE").is_ok() {
                 trace!("PARSER", $($arg)*)
             }
@@ -46,9 +47,7 @@ macro_rules! err_advance_safe {
                 }
             }
 
-            if cfg!(debug_assertions) {
-                println!("TRACE: ERROR: {}", $message);
-            }
+            trace_parser!("TRACE: ERROR: {}", $message);
 
             // Add error to list of errors
             $self.errors.push($message);

@@ -8,7 +8,8 @@ use crate::{parser::{parse, Expr, Stmt}, resolver::{resolve, Function, Globals, 
 
 macro_rules! trace_compiler {
     ($($arg:tt)*) => {
-        if cfg!(debug_assertions) {
+        #[cfg(debug_assertions)]
+        {
             if std::env::var("COMPILER_TRACE").is_ok() {
                 trace!("COMPILER", $($arg)*)
             }

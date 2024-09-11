@@ -134,11 +134,10 @@ impl<'a> Lexer<'a> {
             None => Ok(Token::EOF),
         };
 
-        if cfg!(debug_assertions) {
-            match result {
-                Ok(ref token) => trace_lexer!("Produced token: {}", token),
-                Err(ref err) => trace_lexer!("Produced token: {}", err)
-            }
+        #[cfg(debug_assertions)]
+        match result {
+            Ok(ref token) => trace_lexer!("Produced token: {}", token),
+            Err(ref err) => trace_lexer!("Produced token: {}", err)
         }
         
         result

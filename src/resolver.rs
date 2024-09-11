@@ -4,7 +4,8 @@ use crate::{parser::{Expr, Stmt}, trace};
 
 macro_rules! trace_resolver {
     ($($arg:tt)*) => {
-        if cfg!(debug_assertions) {
+        #[cfg(debug_assertions)]
+        {
             if std::env::var("RESOLVER_TRACE").is_ok() {
                 trace!("RESOLVER", $($arg)*)
             }
