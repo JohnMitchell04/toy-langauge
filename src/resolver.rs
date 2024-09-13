@@ -732,12 +732,16 @@ mod tests {
     use super::{resolve, Function, Globals};
 
     fn run<'a>(input: &str) -> (Globals<'a>, HashMap<String, Function<'a>>) {
-        let stmts = parser::parse(input).unwrap();
+        if !input.is_ascii() { panic!("Testing input must be ASCII") }
+        let input: Vec<char> = input.chars().collect();
+        let stmts = parser::parse(&input).unwrap();
         resolve(stmts).unwrap()
     }
 
     fn run_err(input: &str) -> Vec<String> {
-        let stmts = parser::parse(input).unwrap();
+        if !input.is_ascii() { panic!("Testing input must be ASCII") }
+        let input: Vec<char> = input.chars().collect();
+        let stmts = parser::parse(&input).unwrap();
         if let Err(errs) = resolve(stmts) { errs } else { panic!("FATAL: The resolver has successfully resolved incorrect input") }
     }
 

@@ -165,7 +165,7 @@ impl Display for Stmt {
 /// **Resturns:**
 /// 
 /// A vector of top level statements or a vector of errors if present
-pub fn parse(input: &str) -> Result<Vec<Stmt>, Vec<String>> {
+pub fn parse(input: &[char]) -> Result<Vec<Stmt>, Vec<String>> {
     let parser = Parser::new(input);
     parser.parse()
 }
@@ -180,7 +180,7 @@ impl<'a> Parser<'a> {
     /// Create a new Parser with the given input.
     /// 
     /// The parser will also create and run a lexer that will process the input.
-    pub fn new(input: &'a str) -> Self {
+    pub fn new(input: &'a [char]) -> Self {
         let lexer = Lexer::new(input).peekable();
 
         Parser { lexer, errors: Vec::new() }
@@ -456,7 +456,7 @@ impl<'a> Parser<'a> {
             Err(ref err) => { err_add_shorthand!(err, self); "".to_string() },
         };
 
-        match_no_error!(self, Token::Op('='), "Expected '=' after identifier");
+        match_no_error!(self, Token::Equal, "Expected '=' after identifier");
 
         let body = Box::new(self.parse_expr());
 
@@ -512,7 +512,7 @@ impl<'a> Parser<'a> {
                 match_no_error!(self, Token::RParen, "Expected closing ')'");
                 left
             },
-            Ok(Token::Op(_)) => self.parse_unary(),
+            // Ok(Token::Op(_)) => self.parse_unary(),
             Ok(_) => {
                 self.errors.push(String::from("Expected operator, number or ident"));
                 Expr::Null
@@ -526,7 +526,7 @@ impl<'a> Parser<'a> {
 
         loop {
             let op = match self.peek() {
-                Ok(Token::Op(ref op)) => *op,
+                // Ok(Token::Op(ref op)) => *op,
                 Ok(Token::LParen) => '(',
                 Ok(Token::EOF) => break,
                 Ok(_) => break,
@@ -603,25 +603,24 @@ impl<'a> Parser<'a> {
 
     // TODO: Expand to include pre-increment and pre-decrement and logical not
     /// Parse a unary expression.
-    fn parse_unary(&mut self) -> Expr {
-        trace_parser!("Parsing unary expression");
-        let op = if let Token::Op(op) = self.next().unwrap() { 
-            op
-        } else {
-            panic!("FATAL: Tried to parse non-operator as first token in unary expression, this should never happen")
-        };
+    // fn parse_unary(&mut self) -> Expr {
+    //     trace_parser!("Parsing unary expression");
+    //     let op = if let Token::Op(op) = self.next().unwrap() { 
+    //         op
+    //     } else {
+    //         panic!("FATAL: Tried to parse non-operator as first token in unary expression, this should never happen")
+    //     };
 
+    //     let ((), r_binding) = if let Some(binding) = self.prefix_binding_power(op) {
+    //         binding
+    //     } else {
+    //         self.errors.push(format!("Bad operator: {}", op));
+    //         return Expr::Null
+    //     };
 
-        let ((), r_binding) = if let Some(binding) = self.prefix_binding_power(op) {
-            binding
-        } else {
-            self.errors.push(format!("Bad operator: {}", op));
-            return Expr::Null
-        };
-
-        let right = Box::new(self.expr_binding(r_binding));
-        Expr::Unary { op, right }
-    }
+    //     let right = Box::new(self.expr_binding(r_binding));
+    //     Expr::Unary { op, right }
+    // }
 
     /// Get the binding power of some prefix operator.
     fn prefix_binding_power(&self, op: char) -> Option<((), u8)> {
@@ -662,12 +661,16 @@ mod tests {
     use super::Parser;
 
     fn parse_no_error(input: &str) -> Vec<Stmt> {
-        let parser = Parser::new(input);
+        if !input.is_ascii() { panic!("Testing input must be ASCII") }
+        let input: Vec<char> = input.chars().collect();
+        let parser = Parser::new(&input);
         parser.parse().unwrap()
     }
 
     fn parse_error(input: &str) -> Vec<String> {
-        let parser = Parser::new(input);
+        if !input.is_ascii() { panic!("Testing input must be ASCII") }
+        let input: Vec<char> = input.chars().collect();
+        let parser = Parser::new(&input);
         if let Err(errs) = parser.parse() { errs } else { panic!("FATAL: The parser successfully parsed incorrect input") }
     }
 

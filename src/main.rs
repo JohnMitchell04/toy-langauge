@@ -44,10 +44,18 @@ fn main() {
     let args = Cli::parse();
 
     if !args.source.exists() {
-        println!("Error: source file: \"{}\", does not exist", args.source.to_string_lossy());
+        eprintln!("Error: Source file: \"{}\", does not exist", args.source.to_string_lossy());
         return;
     }
     let input = std::fs::read_to_string(args.source).expect("Error: Could not read file");
+
+    // TODO: Improve this to point to the non ascii acharacters
+    let input: Vec<char> = if !input.is_ascii() {
+        eprintln!("Error: Source file contains non-ascii caharcter(s)");
+        return;
+    } else {
+        input.chars().collect()
+    };
 
     // Set up debug info
     #[cfg(debug_assertions)]

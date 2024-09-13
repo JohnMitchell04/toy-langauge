@@ -29,7 +29,7 @@ macro_rules! trace_compiler {
 /// **Returns:**
 /// 
 /// The [Module] of compiled code if successful, otherwise a vector of errors that occured during running.
-pub fn compile<'ctx>(source: &str, context: &'ctx Context) -> Result<Module<'ctx>, Vec<String>> {
+pub fn compile<'ctx>(source: &[char], context: &'ctx Context) -> Result<Module<'ctx>, Vec<String>> {
     // Create necessary LLVM instances
     let builder = context.create_builder();
     let module = context.create_module("main");
@@ -418,62 +418,68 @@ impl<'ctx> Compiler<'ctx> {
 
 #[cfg(test)]
 mod tests {
-    use inkwell::context::Context;
+    use inkwell::{context::Context, module::Module};
 
     use super::compile;
+
+    fn test_compile<'ctx>(input: &str, context: &'ctx Context) -> Result<Module<'ctx>, Vec<String>> {
+        if !input.is_ascii() { panic!("Testing input must be ASCII") }
+        let input: Vec<char> = input.chars().collect();
+        compile(&input, context)
+    }
 
     #[test]
     fn test_global() {
         let context = Context::create();
-        assert!(compile("global var x = 1; fun main() { return x; }", &context).is_ok())
+        assert!(test_compile("global var x = 1; fun main() { return x; }", &context).is_ok())
     }
 
     #[test]
     fn test_if() {
         let context = Context::create();
-        assert!(compile("fun main() { if (1 < 2) { 1; } else { 2; } return 1; }", &context).is_ok())
+        assert!(test_compile("fun main() { if (1 < 2) { 1; } else { 2; } return 1; }", &context).is_ok())
     }
 
     #[test]
     fn test_if_return() {
         let context = Context::create();
-        assert!(compile("fun main() { if (1 < 2) { return 1; } else { return 2; } }", &context).is_ok())
+        assert!(test_compile("fun main() { if (1 < 2) { return 1; } else { return 2; } }", &context).is_ok())
     }
 
     #[test]
     fn test_if_partial_return() {
         let context = Context::create();
-        assert!(compile("fun main() { if (1 < 2) { 1; } else { return 2; } return 1; }", &context).is_ok())
+        assert!(test_compile("fun main() { if (1 < 2) { 1; } else { return 2; } return 1; }", &context).is_ok())
     }
 
     #[test]
     fn test_nested_if() {
         let context = Context::create();
-        assert!(compile("fun main() { if (1 < 2) { 1; } else { if (1 < 2) { return 1; } else { return 2; } } return 1; }", &context).is_ok())
+        assert!(test_compile("fun main() { if (1 < 2) { 1; } else { if (1 < 2) { return 1; } else { return 2; } } return 1; }", &context).is_ok())
     }
 
     #[test]
     fn test_nested_if_following() {
         let context = Context::create();
-        assert!(compile("fun main() { if (1 < 2) { 1; } else { if (1 < 2) { 1; } else { 2; } 1; } return 1; }", &context).is_ok())
+        assert!(test_compile("fun main() { if (1 < 2) { 1; } else { if (1 < 2) { 1; } else { 2; } 1; } return 1; }", &context).is_ok())
     }
 
     #[test]
     fn test_nested_if_following_effect() {
         let context = Context::create();
-        assert!(compile("fun main() { var x = 1; if (1 < 2) { 1; } else { if (1 < 2) { 1; } else { 2; } x = 1; } return 1; }", &context).is_ok())
+        assert!(test_compile("fun main() { var x = 1; if (1 < 2) { 1; } else { if (1 < 2) { 1; } else { 2; } x = 1; } return 1; }", &context).is_ok())
     }
 
     #[test]
     fn test_for() {
         let context = Context::create();
-        assert!(compile("extern printd(x); fun main() { for (var x = 0; x < 10; x = x + 1) { printd(x); } return 1; }", &context).is_ok())
+        assert!(test_compile("extern printd(x); fun main() { for (var x = 0; x < 10; x = x + 1) { printd(x); } return 1; }", &context).is_ok())
     }
 
     #[test]
     fn recursive_fib() {
         let context = Context::create();
-        assert!(compile("
+        assert!(test_compile("
 fun recursive_fib(x) {
     if (x < 3) {
         return 1;
@@ -491,7 +497,7 @@ fun main() {
     #[test]
     fn iterative_fib() {
         let context = Context::create();
-        assert!(compile("
+        assert!(test_compile("
 fun iterative_fib(x) {
     var a = 1;
     var b = 1; 
