@@ -2,7 +2,7 @@ use std::{cell::RefCell, collections::HashMap, iter::{self}, rc::Rc};
 use inkwell::{
     basic_block::BasicBlock, builder::Builder, context::Context, module::Module, passes::PassBuilderOptions, targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine}, types::BasicMetadataTypeEnum, values::{BasicMetadataValueEnum, FloatValue, FunctionValue, PointerValue}, OptimizationLevel
 };
-use crate::{parser::{parse, Expr, Stmt}, resolver::{resolve, Function, Globals, Scope, Statement, Variable}};
+use crate::{lexer::Token, parser::{parse, Expr, Stmt}, resolver::{resolve, Function, Globals, Scope, Statement, Variable}};
 
 #[cfg(debug_assertions)]
 use crate::trace;
@@ -95,25 +95,45 @@ impl<'ctx> Compiler<'ctx> {
                 let rhs = self.compile_global_body(right).get_constant().unwrap().0;
 
                 match op {
-                    '+' => self.context.f64_type().const_float(lhs + rhs),
-                    '-' => self.context.f64_type().const_float(lhs - rhs),
-                    '*' => self.context.f64_type().const_float(lhs * rhs),
-                    '/' => self.context.f64_type().const_float(lhs / rhs),
-                    '<' => {
+                    Token::Plus => self.context.f64_type().const_float(lhs + rhs),
+                    Token::Sub => self.context.f64_type().const_float(lhs - rhs),
+                    Token::Star => self.context.f64_type().const_float(lhs * rhs),
+                    Token::Divide => self.context.f64_type().const_float(lhs / rhs),
+                    Token::Less => {
                         let res = if lhs < rhs { 1f64 } else { 0f64 };
                         self.context.f64_type().const_float(res)
                     },
-                    '>' => {
+                    Token::Greater => {
                         let res = if lhs > rhs { 1f64 } else { 0f64 };
+                        self.context.f64_type().const_float(res)
+                    },
+                    Token::LessEqual => {
+                        let res = if lhs <= rhs { 1f64 } else { 0f64 };
+                        self.context.f64_type().const_float(res)
+                    },
+                    Token::GreaterEqual => {
+                        let res = if lhs >= rhs { 1f64 } else { 0f64 };
+                        self.context.f64_type().const_float(res)
+                    },
+                    Token::EqualEqual => {
+                        let res = if lhs == rhs { 1f64 } else { 0f64 };
+                        self.context.f64_type().const_float(res)
+                    },
+                    Token::ExclamEqual => {
+                        let res = if lhs != rhs { 1f64 } else { 0f64 };
                         self.context.f64_type().const_float(res)
                     },
                     _ => { panic!("FATAL: Attempting to compile invalid binary expression, this indicates a programmer error in the parser has caused a catasrophic crash") }
                 }
             },
-            Expr::Unary { op, right } => {
+            Expr::Unary { op, body, pre: _ } => {
                 match op {
-                    '-' => {
-                        let val = - self.compile_global_body(right).get_constant().unwrap().0;
+                    Token::Sub => {
+                        let val = - self.compile_global_body(body).get_constant().unwrap().0;
+                        self.context.f64_type().const_float(val)
+                    },
+                    Token::Exclam => {
+                        let val = if self.compile_global_body(body).get_constant().unwrap().0 > 0f64 { 0f64 } else { 1f64 };
                         self.context.f64_type().const_float(val)
                     },
                     _ => { panic!("FATAL: Attempting to compile invalid unary expression, this indicates a programmer error in the parser has caused a catasrophic crash") }
@@ -121,9 +141,9 @@ impl<'ctx> Compiler<'ctx> {
             },
             Expr::Number(number) => self.context.f64_type().const_float(*number),
             Expr::Null => panic!("FATAL: Attempting to resolve null expression, this indicates a programmer error in the parser has caused a catasrophic crash"),
-            Expr::VarDeclar { variable: _, body: _ } => panic!("FATAL: Attempting to resolve var declar in a global declaration, this indicates a programmer error in the parser has caused a catasrophic crash"),
-            Expr::Call { function_name: _, args: _ } => panic!("FATAL: Attempting to resolve call in a global declaration, this indicates a programmer error in the resolver has caused a catasrophic crash"),
-            Expr::VarAssign { variable: _, body: _ } => panic!("FATAL: Attempting to resolve variable assign in global declaration, this indicates a programmer error in the resolver has caused a catasrophic crash"),
+            Expr::VarDeclar { .. } => panic!("FATAL: Attempting to resolve var declar in a global declaration, this indicates a programmer error in the parser has caused a catasrophic crash"),
+            Expr::Call { .. } => panic!("FATAL: Attempting to resolve call in a global declaration, this indicates a programmer error in the resolver has caused a catasrophic crash"),
+            Expr::VarAssign { .. } => panic!("FATAL: Attempting to resolve variable assign in global declaration, this indicates a programmer error in the resolver has caused a catasrophic crash"),
             Expr::Variable(_) => panic!("FATAL: Attempting to resolve variable in global declaration, this indicates a programmer error in the resolver has caused a catasrophic crash"),
         }
     }
@@ -305,10 +325,10 @@ impl<'ctx> Compiler<'ctx> {
             // TODO: Re-work when type literals are added
             Expr::Number(number) => self.context.f64_type().const_float(*number),
             Expr::Variable(name) => self.compile_variable_load(name, scope),
-            Expr::VarAssign { variable, body } => self.compile_assignment(parent, variable, body, scope),
+            Expr::VarAssign { variable, body, op } => self.compile_assignment(parent, variable, body, op, scope),
             Expr::VarDeclar { variable, body } => self.compile_declaration(parent, variable, body, scope),
-            Expr::Binary { op, left, right } => self.compile_binary(parent, *op, left, right, scope),
-            Expr::Unary { op, right } => self.compile_unary(parent, *op, right, scope),
+            Expr::Binary { op, left, right } => self.compile_binary(parent, op, left, right, scope),
+            Expr::Unary { op, body, pre } => self.compile_unary(parent, op, body, *pre, scope),
             // TODO: Rework when null expressions are properly added
             Expr::Null => unimplemented!()
         }
@@ -332,12 +352,36 @@ impl<'ctx> Compiler<'ctx> {
         self.builder.build_load(self.context.f64_type(), variable, name).unwrap().into_float_value()
     }
 
-    fn compile_assignment(&self, parent: FunctionValue, variable: &str, body: &Expr, scope: &mut Scope<'ctx>) -> FloatValue<'ctx> {
+    fn compile_assignment(&self, parent: FunctionValue, variable: &str, body: &Expr, op: &Token, scope: &mut Scope<'ctx>) -> FloatValue<'ctx> {
         trace_compiler!("Compiling variable assignment");
 
-        let value = self.compile_expr(parent, body, scope);
+        let mut value = self.compile_expr(parent, body, scope);
         let ptr = scope.get_variable(variable).borrow().get_pointer_value();
-        self.builder.build_store(ptr, value).unwrap();
+
+        match op {
+            Token::Equal => self.builder.build_store(ptr, value).unwrap(),
+            Token::PlusEqual => {
+                let variable = self.builder.build_load(self.context.f64_type(), ptr, variable).unwrap().into_float_value();
+                value = self.builder.build_float_add(variable, value, "tmpadd").unwrap();
+                self.builder.build_store(ptr, value).unwrap()
+            },
+            Token::SubEqual => {
+                let variable = self.builder.build_load(self.context.f64_type(), ptr, variable).unwrap().into_float_value();
+                value = self.builder.build_float_sub(variable, value, "tmpadd").unwrap();
+                self.builder.build_store(ptr, value).unwrap()
+            },
+            Token::MulEqual => {
+                let variable = self.builder.build_load(self.context.f64_type(), ptr, variable).unwrap().into_float_value();
+                value = self.builder.build_float_mul(variable, value, "tmpadd").unwrap();
+                self.builder.build_store(ptr, value).unwrap()
+            },
+            Token::DivideEqual => {
+                let variable = self.builder.build_load(self.context.f64_type(), ptr, variable).unwrap().into_float_value();
+                value = self.builder.build_float_div(variable, value, "tmpadd").unwrap();
+                self.builder.build_store(ptr, value).unwrap()
+            },
+            _ => panic!("FATAL: The compiler has attempted to compile an invalid assignment, this indicates a programmer error in the parser has caused a catasrophic crash")
+        };
 
         value
     }
@@ -355,35 +399,109 @@ impl<'ctx> Compiler<'ctx> {
         value
     }
 
-    fn compile_binary(&self, parent: FunctionValue, op: char, left: &Expr, right: &Expr, scope: &mut Scope<'ctx>) -> FloatValue<'ctx> {
+    fn compile_binary(&self, parent: FunctionValue, op: &Token, left: &Expr, right: &Expr, scope: &mut Scope<'ctx>) -> FloatValue<'ctx> {
         trace_compiler!("Compiling binary expression");
 
         let lhs = self.compile_expr(parent, left, scope);
         let rhs = self.compile_expr(parent, right, scope);
         match op {
-            '+' => self.builder.build_float_add(lhs, rhs, "tmpadd").unwrap(),
-            '-' => self.builder.build_float_sub(lhs, rhs, "tmpsub").unwrap(),
-            '*' => self.builder.build_float_mul(lhs, rhs, "tmpmul").unwrap(),
-            '/' => self.builder.build_float_div(lhs, rhs, "tmpdiv").unwrap(),
-            // TODO: Both of the comparisons below need to be looked at when types are added
-            '<' => {
+            Token::Plus => self.builder.build_float_add(lhs, rhs, "tmpadd").unwrap(),
+            Token::Sub => self.builder.build_float_sub(lhs, rhs, "tmpsub").unwrap(),
+            Token::MulEqual => self.builder.build_float_mul(lhs, rhs, "tmpmul").unwrap(),
+            Token::Divide => self.builder.build_float_div(lhs, rhs, "tmpdiv").unwrap(),
+            // TODO: The comparisons below need to be looked at when types are added
+            Token::Less => {
                 let cmp = self.builder.build_float_compare(inkwell::FloatPredicate::ULT, lhs, rhs, "tmpcmp").unwrap();
                 self.builder.build_unsigned_int_to_float(cmp, self.context.f64_type(), "tmpbool").unwrap()
             },
-            '>' => {
+            Token::Greater => {
                 let cmp = self.builder.build_float_compare(inkwell::FloatPredicate::UGT, lhs, rhs, "tmpcmp").unwrap();
+                self.builder.build_unsigned_int_to_float(cmp, self.context.f64_type(), "tmpbool").unwrap()
+            },
+            Token::LessEqual => {
+                let cmp = self.builder.build_float_compare(inkwell::FloatPredicate::ULE, lhs, rhs, "tmpcmp").unwrap();
+                self.builder.build_unsigned_int_to_float(cmp, self.context.f64_type(), "tmpbool").unwrap()
+            },
+            Token::GreaterEqual => {
+                let cmp = self.builder.build_float_compare(inkwell::FloatPredicate::UGE, lhs, rhs, "tmpcmp").unwrap();
+                self.builder.build_unsigned_int_to_float(cmp, self.context.f64_type(), "tmpbool").unwrap()
+            },
+            Token::EqualEqual => {
+                let cmp = self.builder.build_float_compare(inkwell::FloatPredicate::UEQ, lhs, rhs, "tmpcmp").unwrap();
+                self.builder.build_unsigned_int_to_float(cmp, self.context.f64_type(), "tmpbool").unwrap()
+            },
+            Token::ExclamEqual => {
+                let cmp = self.builder.build_float_compare(inkwell::FloatPredicate::UNE, lhs, rhs, "tmpcmp").unwrap();
                 self.builder.build_unsigned_int_to_float(cmp, self.context.f64_type(), "tmpbool").unwrap()
             },
             _ => { panic!("FATAL: Attempting to compile invalid binary expression, this indicates a programmer error in the parser has caused a catasrophic crash") }
         }
     }
 
-    fn compile_unary(&self, parent: FunctionValue, op: char, right: &Expr, scope: &mut Scope<'ctx>) -> FloatValue<'ctx> {
+    fn compile_unary(&self, parent: FunctionValue, op: &Token, right: &Expr, pre: bool, scope: &mut Scope<'ctx>) -> FloatValue<'ctx> {
         trace_compiler!("Compiling unary expression");
+
+        // TODO: Rework when types are added
         match op {
-            '-' => {
+            Token::Sub => {
                 let val = self.compile_expr(parent, right, scope);
                 self.builder.build_float_neg(val, "tempneg").unwrap()
+            },
+            Token::Exclam => {
+                let val = self.compile_expr(parent, right, scope);
+                let cmp = self.builder.build_float_compare(inkwell::FloatPredicate::UNE, val, self.context.f64_type().const_float(0f64), "tmpcmp").unwrap();
+                self.builder.build_unsigned_int_to_float(cmp, self.context.f64_type(), "tmpbool").unwrap()
+            },
+            Token::PlusPlus => {
+                if pre {
+                    let val = self.compile_expr(parent, right, scope);
+                    let val = self.builder.build_float_add(val, self.context.f64_type().const_float(1f64), "tmpadd").unwrap();
+
+                    let ptr = match right {
+                        Expr::Variable(var) => scope.get_variable(var).borrow().get_pointer_value(),
+                        _ => panic!("FATAL: Attempting to compile unary increment on non-variable, this indicates a programmer error in the resolver has caused a catasrophic crash"),
+                    };
+
+                    self.builder.build_store(ptr, val).unwrap();
+                    val
+                } else {
+                    let val = self.compile_expr(parent, right, scope);
+                    let val_after = self.builder.build_float_add(val, self.context.f64_type().const_float(1f64), "tmpadd").unwrap();
+
+                    let ptr = match right {
+                        Expr::Variable(var) => scope.get_variable(var).borrow().get_pointer_value(),
+                        _ => panic!("FATAL: Attempting to compile unary increment on non-variable, this indicates a programmer error in the resolver has caused a catasrophic crash"),
+                    };
+
+                    self.builder.build_store(ptr, val_after).unwrap();
+                    val
+                }
+            },
+            Token::SubSub => {
+                if pre {
+                    let val = self.compile_expr(parent, right, scope);
+                    let val = self.builder.build_float_sub(val, self.context.f64_type().const_float(1f64), "tmpadd").unwrap();
+
+                    let ptr = match right {
+                        Expr::Variable(var) => scope.get_variable(var).borrow().get_pointer_value(),
+                        _ => panic!("FATAL: Attempting to compile unary decrement on non-variable, this indicates a programmer error in the resolver has caused a catasrophic crash"),
+                    };
+
+                    self.builder.build_store(ptr, val).unwrap();
+                    val
+                } else {
+                    let val = self.compile_expr(parent, right, scope);
+                    let val_after = self.builder.build_float_sub(val, self.context.f64_type().const_float(1f64), "tmpadd").unwrap();
+                    
+                    
+                    let ptr = match right {
+                        Expr::Variable(var) => scope.get_variable(var).borrow().get_pointer_value(),
+                        _ => panic!("FATAL: Attempting to compile unary decrement on non-variable, this indicates a programmer error in the resolver has caused a catasrophic crash"),
+                    };
+
+                    self.builder.build_store(ptr, val_after).unwrap();
+                    val
+                }
             },
             _ => { panic!("FATAL: Attempting to compile invalid unary expression, this indicates a programmer error in the parser has caused a catasrophic crash") }
         }
@@ -416,6 +534,7 @@ impl<'ctx> Compiler<'ctx> {
     }
 }
 
+// TODO: At some point add the ability to run the results and ensuring the output is correct
 #[cfg(test)]
 mod tests {
     use inkwell::{context::Context, module::Module};
@@ -513,6 +632,39 @@ fun iterative_fib(x) {
     
 fun main() {
     return iterative_fib(10);
+}", &context).is_ok())
+    }
+
+    #[test]
+    fn shortened_for() {
+        let context = Context::create();
+        assert!(test_compile("
+extern printd(x);
+
+fun main() {
+    for (var x = 0; x < 10; x++) {
+        printd(x);
+    }
+
+    return 1;
+}", &context).is_ok())
+    }
+
+    #[test]
+    fn pre_post() {
+        let context = Context::create();
+        assert!(test_compile("
+extern printd(x);
+
+fun main() {
+    var y = 0;
+    var z = 0;
+    for (var x = 0; x < 10; x++) {
+        printd(y++);
+        printd(--z);
+    }
+
+    return 1;
 }", &context).is_ok())
     }
 }

@@ -23,16 +23,16 @@ pub enum Token {
 
     // TODO: Maybe add ** and // as raising to powers
     // Operations
-    Equal, Plus, Sub, Divide, Greater, PlusPlus, SubSub, PlusEqual, SubEqual, MulEqual, DivideEqual, Exclam,
+    Equal, Plus, Sub, Divide, Star, PlusPlus, SubSub, PlusEqual, SubEqual, MulEqual, DivideEqual, Exclam,
 
     // Comparisons
-    Star, Less, EqualEqual, LessEqual, GreaterEqual, ExclamEqual,
+    Less, Greater, EqualEqual, LessEqual, GreaterEqual, ExclamEqual,
 
     // Type keywords
     // Void, Bool, I8, I16, I32, I64, I128, U8, U16, U32, U64, U128, F16, F32, F64, F128,
 
     // User data
-    Ident(String), Number(f64),
+    Variable(String), Number(f64),
 
     EOF,
 }
@@ -40,9 +40,26 @@ pub enum Token {
 impl Token {
     pub fn take_name(&mut self) -> String {
         match std::mem::replace(self, Self::EOF) {
-            Self::Ident(name) => name,
+            Self::Variable(name) => name,
             _ => panic!("Cannot take variable name"),
         }
+    }
+
+    pub fn is_prefix_op(&self) -> bool {
+        matches!(self, Self::Sub | Self::PlusPlus | Self::SubSub | Self::Exclam)
+    }
+
+    // TODO: Add star as postifx operator when pointer are added
+    pub fn is_postfix_operator(&self) -> bool {
+        matches!(self, Self::SubSub | Self::PlusPlus | Self::Star)
+    }
+
+    pub fn is_infix_operator(&self) -> bool {
+        matches!(self, | Self::Plus | Self::Sub | Self::Divide | Self::Star | Self::Less | Self::Greater | Self::EqualEqual | Self::LessEqual | Self::GreaterEqual | Self::ExclamEqual)
+    }
+
+    pub fn is_assignment(&self) -> bool {
+        matches!(self, Self::Equal | Self::SubEqual | Self::PlusEqual | Self::DivideEqual | Self::MulEqual)
     }
 }
 
@@ -94,7 +111,7 @@ impl Display for Token {
             Self::ExclamEqual => write!(f, "!="),
 
             // User data
-            Self::Ident(ident) => write!(f, "Identifier: {}", ident),
+            Self::Variable(ident) => write!(f, "Identifier: {}", ident),
             Self::Number(num) => write!(f, "Number: {}", &num.to_string()),
 
             Self::EOF => write!(f, "EOF"),
@@ -307,7 +324,7 @@ impl<'a> Lexer<'a> {
             ['v', 'a', 'r'] => Ok(Token::Var),
             ['g', 'l', 'o', 'b', 'a', 'l'] => Ok(Token::Global),
             ['r', 'e', 't', 'u', 'r', 'n'] => Ok(Token::Return),
-            ident => Ok(Token::Ident(ident.iter().collect())),
+            ident => Ok(Token::Variable(ident.iter().collect())),
         }
     }
 
@@ -481,7 +498,7 @@ mod tests {
     #[test]
     fn ident() {
         let output = create_lexer("input");
-        assert_eq!(vec![Token::Ident("input".to_string()), Token::EOF], output)
+        assert_eq!(vec![Token::Variable("input".to_string()), Token::EOF], output)
     }
 
     #[test]
@@ -517,7 +534,7 @@ mod tests {
     #[test]
     fn assign_expr() {
         let output = create_lexer("var test = 5;");
-        assert_eq!(vec![Token::Var, Token::Ident("test".to_string()), Token::Equal, Token::Number(5f64), Token::Semicolon, Token::EOF], output)
+        assert_eq!(vec![Token::Var, Token::Variable("test".to_string()), Token::Equal, Token::Number(5f64), Token::Semicolon, Token::EOF], output)
     }
 
     #[test]
@@ -525,9 +542,9 @@ mod tests {
         let output = create_lexer("for (x = 5; x < 10; x = x + 1) { var test = 5; }");
         assert_eq!(
             vec![
-                Token::For, Token::LParen, Token::Ident("x".to_string()), Token::Equal, Token::Number(5f64), Token::Semicolon, Token::Ident("x".to_string()),
-                Token::Less, Token::Number(10f64), Token::Semicolon, Token::Ident("x".to_string()), Token::Equal, Token::Ident("x".to_string()),
-                Token::Plus, Token::Number(1f64), Token::RParen, Token::LBrace, Token::Var, Token::Ident("test".to_string()), Token::Equal, Token::Number(5f64),
+                Token::For, Token::LParen, Token::Variable("x".to_string()), Token::Equal, Token::Number(5f64), Token::Semicolon, Token::Variable("x".to_string()),
+                Token::Less, Token::Number(10f64), Token::Semicolon, Token::Variable("x".to_string()), Token::Equal, Token::Variable("x".to_string()),
+                Token::Plus, Token::Number(1f64), Token::RParen, Token::LBrace, Token::Var, Token::Variable("test".to_string()), Token::Equal, Token::Number(5f64),
                 Token::Semicolon, Token::RBrace, Token::EOF
             ],
             output
@@ -539,8 +556,8 @@ mod tests {
         let output = create_lexer("fun test(x, y, z) {}");
         assert_eq!(
             vec![
-                Token::Fun, Token::Ident("test".to_string()), Token::LParen, Token::Ident("x".to_string()), Token::Comma, Token::Ident("y".to_string()),
-                Token::Comma, Token::Ident("z".to_string()), Token::RParen, Token::LBrace, Token::RBrace, Token::EOF
+                Token::Fun, Token::Variable("test".to_string()), Token::LParen, Token::Variable("x".to_string()), Token::Comma, Token::Variable("y".to_string()),
+                Token::Comma, Token::Variable("z".to_string()), Token::RParen, Token::LBrace, Token::RBrace, Token::EOF
             ],
             output
         )
@@ -549,90 +566,96 @@ mod tests {
     #[test]
     fn pre_increment() {
         let output = create_lexer("++test");
-        assert_eq!(vec![Token::PlusPlus, Token::Ident("test".to_string()), Token::EOF], output)
+        assert_eq!(vec![Token::PlusPlus, Token::Variable("test".to_string()), Token::EOF], output)
     }
 
     #[test]
     fn post_increment() {
         let output = create_lexer("test++");
-        assert_eq!(vec![Token::Ident("test".to_string()), Token::PlusPlus, Token::EOF], output)
+        assert_eq!(vec![Token::Variable("test".to_string()), Token::PlusPlus, Token::EOF], output)
     }
 
     #[test]
     fn pre_decrement() {
         let output = create_lexer("--test");
-        assert_eq!(vec![Token::SubSub, Token::Ident("test".to_string()), Token::EOF], output)
+        assert_eq!(vec![Token::SubSub, Token::Variable("test".to_string()), Token::EOF], output)
     }
 
     #[test]
     fn post_decrement() {
         let output = create_lexer("test--");
-        assert_eq!(vec![Token::Ident("test".to_string()), Token::SubSub, Token::EOF], output)
+        assert_eq!(vec![Token::Variable("test".to_string()), Token::SubSub, Token::EOF], output)
     }
 
     #[test]
     fn plus_equal() {
         let output = create_lexer("test += 1");
-        assert_eq!(vec![Token::Ident("test".to_string()), Token::PlusEqual, Token::Number(1f64), Token::EOF], output)
+        assert_eq!(vec![Token::Variable("test".to_string()), Token::PlusEqual, Token::Number(1f64), Token::EOF], output)
     }
 
     #[test]
     fn sub_equal() {
         let output = create_lexer("test -= 1");
-        assert_eq!(vec![Token::Ident("test".to_string()), Token::SubEqual, Token::Number(1f64), Token::EOF], output)
+        assert_eq!(vec![Token::Variable("test".to_string()), Token::SubEqual, Token::Number(1f64), Token::EOF], output)
     }
 
     #[test]
     fn mul_equal() {
         let output = create_lexer("test *= 1");
-        assert_eq!(vec![Token::Ident("test".to_string()), Token::MulEqual, Token::Number(1f64), Token::EOF], output)
+        assert_eq!(vec![Token::Variable("test".to_string()), Token::MulEqual, Token::Number(1f64), Token::EOF], output)
     }
 
     #[test]
     fn divide_equal() {
         let output = create_lexer("test /= 1");
-        assert_eq!(vec![Token::Ident("test".to_string()), Token::DivideEqual, Token::Number(1f64), Token::EOF], output)
+        assert_eq!(vec![Token::Variable("test".to_string()), Token::DivideEqual, Token::Number(1f64), Token::EOF], output)
     }
 
     #[test]
     fn exclam() {
         let output = create_lexer("!test");
-        assert_eq!(vec![Token::Exclam, Token::Ident("test".to_string()), Token::EOF], output)
+        assert_eq!(vec![Token::Exclam, Token::Variable("test".to_string()), Token::EOF], output)
     }
 
     #[test]
     fn exclam_equal() {
         let output = create_lexer("test != 1");
-        assert_eq!(vec![Token::Ident("test".to_string()), Token::ExclamEqual, Token::Number(1f64), Token::EOF], output)
+        assert_eq!(vec![Token::Variable("test".to_string()), Token::ExclamEqual, Token::Number(1f64), Token::EOF], output)
     }
 
     #[test]
     fn less() {
         let output = create_lexer("test < 1");
-        assert_eq!(vec![Token::Ident("test".to_string()), Token::Less, Token::Number(1f64), Token::EOF], output)
+        assert_eq!(vec![Token::Variable("test".to_string()), Token::Less, Token::Number(1f64), Token::EOF], output)
     }
 
     #[test]
     fn greater() {
         let output = create_lexer("test > 1");
-        assert_eq!(vec![Token::Ident("test".to_string()), Token::Greater, Token::Number(1f64), Token::EOF], output)
+        assert_eq!(vec![Token::Variable("test".to_string()), Token::Greater, Token::Number(1f64), Token::EOF], output)
     }
 
     #[test]
     fn less_equal() {
         let output = create_lexer("test <= 1");
-        assert_eq!(vec![Token::Ident("test".to_string()), Token::LessEqual, Token::Number(1f64), Token::EOF], output)
+        assert_eq!(vec![Token::Variable("test".to_string()), Token::LessEqual, Token::Number(1f64), Token::EOF], output)
     }
 
     #[test]
     fn greater_equal() {
         let output = create_lexer("test >= 1");
-        assert_eq!(vec![Token::Ident("test".to_string()), Token::GreaterEqual, Token::Number(1f64), Token::EOF], output)
+        assert_eq!(vec![Token::Variable("test".to_string()), Token::GreaterEqual, Token::Number(1f64), Token::EOF], output)
     }
 
     #[test]
     fn equal_equal() {
         let output = create_lexer("test == 1");
-        assert_eq!(vec![Token::Ident("test".to_string()), Token::EqualEqual, Token::Number(1f64), Token::EOF], output)
+        assert_eq!(vec![Token::Variable("test".to_string()), Token::EqualEqual, Token::Number(1f64), Token::EOF], output)
+    }
+
+    #[test]
+    fn two_sub() {
+        let output = create_lexer("1 - -2");
+        assert_eq!(vec![Token::Number(1f64), Token::Sub, Token::Sub, Token::Number(2f64), Token::EOF], output)
     }
 }

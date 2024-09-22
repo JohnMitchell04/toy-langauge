@@ -68,13 +68,14 @@ macro_rules! err_add_shorthand {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Binary {
-        op: char,
+        op: Token,
         left: Box<Expr>,
         right: Box<Expr>,
     },
     Unary {
-        op: char,
-        right: Box<Expr>
+        op: Token,
+        body: Box<Expr>,
+        pre: bool
     },
     Call {
         function_name: String,
@@ -88,6 +89,7 @@ pub enum Expr {
         body: Box<Expr>,
     },
     VarAssign {
+        op: Token,
         variable: String,
         body: Box<Expr>,
     },
@@ -98,12 +100,12 @@ impl Display for Expr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Binary { op, left, right } => write!(f, "{} {} {}", left.as_ref(), op, right.as_ref()),
-            Self::Unary { op, right } => write!(f, "{} {}", op, right.as_ref()),
+            Self::Unary { op, body: right, pre } => write!(f, "{} {}, pre: {}", op, right.as_ref(), pre),
             Self::Call { function_name: fn_name, args } => write!(f, "Call: <fn({}) {}>", args.iter().join(","), fn_name),
             Self::Number(num) => write!(f, "{}", num),
             Self::Variable(ident) => write!(f, "{}", ident),
             Self::VarDeclar { variable, body } => write!(f, "{} = {}", variable, body),
-            Self::VarAssign { variable, body } => write!(f, "{} = {}", variable, body),
+            Self::VarAssign { op, variable, body } => write!(f, "{} {} {}", variable, op, body),
             Self::Null => write!(f, "NULL"),
         }
     }
@@ -274,7 +276,7 @@ impl<'a> Parser<'a> {
     fn parse_prototype(&mut self) -> Stmt {
         trace_parser!("Parsing prototype");
         let name = match self.peek() {
-            Ok(Token::Ident(_)) => self.next().unwrap().take_name(),
+            Ok(Token::Variable(_)) => self.next().unwrap().take_name(),
             Ok(_) => { self.errors.push("Expected function identifier".to_string()); "".to_string() },
             Err(ref err) => { err_add_shorthand!(err, self); "".to_string() },
         };
@@ -286,7 +288,7 @@ impl<'a> Parser<'a> {
             if *token == Token::RParen { break }
 
             match self.peek() {
-                Ok(Token::Ident(_)) => { args.push(self.next().unwrap().take_name()) },
+                Ok(Token::Variable(_)) => { args.push(self.next().unwrap().take_name()) },
                 Ok(_) => err_advance_safe!(self, "Expected argument identifier".to_string(), Token::Comma, Token::RParen, Token::LBrace),
                 Err(ref err) => { let message = String::from(err.message) + &err.section; err_advance_safe!(self, message, Token::Comma, Token::RParen, Token::LBrace) },
             }
@@ -443,6 +445,7 @@ impl<'a> Parser<'a> {
     }
 
     // TODO: Allow multiple assignments and definitions without assignment
+    // TODO: Re-work with new assignment operators
     /// Parse a var statement.
     /// 
     /// **Var** ::= 'var' <[Ident](Token::Ident)> '=' <[Expression](Self::parse_expr)> ';'
@@ -451,7 +454,7 @@ impl<'a> Parser<'a> {
         _ = self.next();
 
         let variable = match self.peek() {
-            Ok(Token::Ident(_)) => self.next().unwrap().take_name(),
+            Ok(Token::Variable(_)) => self.next().unwrap().take_name(),
             Ok(_) => { self.errors.push(String::from("Expected variable identifier")); "".to_string() },
             Err(ref err) => { err_add_shorthand!(err, self); "".to_string() },
         };
@@ -495,24 +498,24 @@ impl<'a> Parser<'a> {
         self.expr_binding(0)
     }
 
-    // TODO: Add support for equality comparisons and logical operators
     /// Recursive expression binding parser.
     fn expr_binding(&mut self, min_binding: u8) -> Expr {
         trace_parser!("Parsing expression binding power: {}", min_binding);
         let mut left = match self.peek() {
+            // TODO: Overhaul when type literals are added
             Ok(Token::Number(ref num)) => {
                 let num = *num;
                 _ = self.next();
                 Expr::Number(num)
             },
-            Ok(Token::Ident(_)) => self.parse_ident(),
+            Ok(Token::Variable(_)) => self.parse_ident().expect("FATAL: Tried to parse non-ident as ident expression, this should never happen and indicates a programmer error"),
             Ok(Token::LParen) => {
                 _ = self.next();
                 let left = self.expr_binding(0);
                 match_no_error!(self, Token::RParen, "Expected closing ')'");
                 left
             },
-            // Ok(Token::Op(_)) => self.parse_unary(),
+            Ok(token) if token.is_prefix_op() => self.parse_prefix(),
             Ok(_) => {
                 self.errors.push(String::from("Expected operator, number or ident"));
                 Expr::Null
@@ -525,52 +528,55 @@ impl<'a> Parser<'a> {
         };
 
         loop {
-            let op = match self.peek() {
-                // Ok(Token::Op(ref op)) => *op,
-                Ok(Token::LParen) => '(',
-                Ok(Token::EOF) => break,
-                Ok(_) => break,
-                Err(_) => break,
-            };
+            match self.peek() {
+                Ok(token) if token.is_assignment() => {
+                    let (l_binding, r_binding) = (0, 1);
+                    if l_binding < min_binding { break }
 
-            if op == '=' {
-                _ = self.next();
+                    let variable = if let Expr::Variable(name) = left { name } else { err_advance_safe!(self, "Expected ident before assignment".to_string(), Token::Semicolon); break };
+                    let token = self.next().unwrap();
 
-                let body = Box::new(self.expr_binding(min_binding));
+                    let right = Box::new(self.expr_binding(r_binding));
+                    left = Expr::VarAssign { op: token, variable, body: right }
+                },
+                Ok(token) if token.is_infix_operator() => {
+                    let (l_binding, r_binding) = match token {
+                        Token::Less | Token::Greater | Token::EqualEqual | Token::LessEqual | Token::GreaterEqual | Token::ExclamEqual => (1, 2),
+                        Token::Plus | Token::Sub => (2, 3),
+                        Token::Star | Token::Divide => (3, 4),
+                        _ => panic!("FATAL: Passed a non-infix operator as a infix expression, this indicates a programmer error"),
+                    };
 
-                let name = if let Expr::Variable(name) = left { name } else { self.errors.push(String::from("Attempting to assign to non-variable")); break };
-                left = Expr::VarAssign { variable: name, body };
-                continue
+                    if l_binding < min_binding { break }
+                    let token = self.next().unwrap();
+
+                    let right = Box::new(self.expr_binding(r_binding));
+                    left = Expr::Binary { op: token, left: Box::new(left), right }
+                },
+                Ok(token) if token.is_postfix_operator() => {
+                    let token = self.next().unwrap();
+
+                    if matches!(token, Token::PlusPlus | Token::SubSub) && !matches!(left, Expr::Variable(_)) {
+                        self.errors.push("Applied increment or decrement operator to non variable".to_string())
+                    }
+
+                    left = Expr::Unary { op: token, body: Box::new(left), pre: false }
+                },
+                Ok(Token::LParen) => {
+                    err_advance_safe!(self, "Unexpected opening '('".to_string(), Token::Semicolon);
+                    break
+                },
+                _ => break,
             }
-
-            if let Some((l_binding, ())) = self.postfix_binding_power(op) {
-                if l_binding < min_binding { break }
-                _ = self.next();
-
-                left = Expr::Unary { op, right: Box::new(left) };
-                continue
-            }
-
-            if let Some((l_binding, r_binding)) = self.infix_binding_power(&op) {
-                if l_binding < min_binding { break }
-                if op == '(' { self.errors.push("Cannot multiply using '('".to_string()) } else { _ = self.next() }
-                
-                let right = Box::new(self.expr_binding(r_binding));
-
-                left = Expr::Binary { op, left: Box::new(left), right };
-                continue
-            }
-
-            break
         }
     
         left
     }
 
     /// Parse a identifier.
-    fn parse_ident(&mut self) -> Expr {
+    fn parse_ident(&mut self) -> Result<Expr, ()> {
         trace_parser!("Parsing identifier");
-        let name = if let Token::Ident(name) = self.next().unwrap() { name } else { panic!("FATAL: Tried to parse non-ident as ident expression, this should never happen") };
+        let function_name = if let Token::Variable(name) = self.next().unwrap() { name } else { return Err(()) };
 
         match self.peek() {
             Ok(Token::LParen) => {
@@ -594,69 +600,68 @@ impl<'a> Parser<'a> {
 
                 match_no_error!(self, Token::RParen, "Expected ')' after args list");
 
-                Expr::Call { function_name: name, args }
+                Ok(Expr::Call { function_name, args })
             },
-            Ok(_) => Expr::Variable(name),
-            Err(_) => Expr::Variable(name),
+            // TODO: Add an array access expression and deal with it here
+            Ok(_) => Ok(Expr::Variable(function_name)),
+            Err(_) => Ok(Expr::Variable(function_name)),
         }
     }
 
-    // TODO: Expand to include pre-increment and pre-decrement and logical not
-    /// Parse a unary expression.
-    // fn parse_unary(&mut self) -> Expr {
-    //     trace_parser!("Parsing unary expression");
-    //     let op = if let Token::Op(op) = self.next().unwrap() { 
-    //         op
-    //     } else {
-    //         panic!("FATAL: Tried to parse non-operator as first token in unary expression, this should never happen")
-    //     };
+    /// Parse a prefix expression.
+    fn parse_prefix(&mut self) -> Expr {
+        trace_parser!("Parsing prefix expression");
+        let op = self.next().unwrap();
 
-    //     let ((), r_binding) = if let Some(binding) = self.prefix_binding_power(op) {
-    //         binding
-    //     } else {
-    //         self.errors.push(format!("Bad operator: {}", op));
-    //         return Expr::Null
-    //     };
+        let right = if matches!(op, Token::PlusPlus | Token::SubSub) {
+            let res = self.parse_ident();
+            if !matches!(res, Ok(Expr::Variable(_))) {
+                self.errors.push("Applied increment or decrement operator to non variable".to_string());
+                return Expr::Null
+            }
 
-    //     let right = Box::new(self.expr_binding(r_binding));
-    //     Expr::Unary { op, right }
+            Box::new(res.unwrap())
+        } else {
+            Box::new(self.expr_binding(5))     
+        };
+
+        Expr::Unary { op, body: right, pre: true }
+    }
+
+    // /// Get the binding power of some prefix operator.
+    // fn prefix_binding_power(&self, op: &Token) -> u8 {
+    //     trace_parser!("Calculating prefix binding power");
+    //     match op {
+    //         Token::Sub => 5,
+    //         Token::SubSub => 5,
+    //         Token::PlusPlus => 5,
+    //         Token::Exclam => 5,
+    //         _ => panic!("FATAL: Passed a non-unary operator as a prefix expression, this indicates a programmer error"),
+    //     }
     // }
 
-    /// Get the binding power of some prefix operator.
-    fn prefix_binding_power(&self, op: char) -> Option<((), u8)> {
-        trace_parser!("Calculating prefix binding power");
-        match op {
-            '-' => Some(((), 6)),
-            _ => None,
-        }
-    }
+    // /// Get the binding power of some infix operator.
+    // fn infix_binding_power(&self, op: &Token) -> (u8, u8) {
+    //     trace_parser!("Calculating infix binding power");
+        
+    // }
 
-    /// Get the binding power of some infix operator.
-    fn infix_binding_power(&self, op: &char) -> Option<(u8, u8)> {
-        trace_parser!("Calculating infix binding power");
-        match op {
-            '(' => Some((0, 0)),
-            '=' => Some((0, 1)), // TODO: Investigate with 4 = = 5
-            '>' | '<' => Some((2, 3)),
-            '+' | '-' => Some((3, 4)),
-            '*' | '/' => Some((4, 5)),
-            _ => None
-        }
-    }
-
+    // TODO: Add star as postifx operator when pointers are added
     // TODO: Implement arrays
-    /// Get the binding power of some postfix operator.
-    fn postfix_binding_power(&self, op: char) -> Option<(u8, ())> {
-        trace_parser!("Calculating postfix binding power");
-        match op {
-            _ => None,
-        }
-    }    
+    // /// Get the binding power of some postfix operator.
+    // fn postfix_binding_power(&self, op: &Token) -> u8 {
+    //     trace_parser!("Calculating postfix binding power");
+    //     match op {
+    //         Token::SubSub => 5,
+    //         Token::PlusPlus => 5,
+    //         _ => panic!("FATAL: Passed a non-unary operator as a postfix expression, this indicates a programmer error"),
+    //     }
+    // }    
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::parser::{Expr, Stmt};
+    use crate::{lexer::Token, parser::{Expr, Stmt}};
 
     use super::Parser;
 
@@ -706,7 +711,7 @@ mod tests {
     #[test]
     fn func_body() {
         let res = parse_no_error("fun test() { 4 + 5; }");
-        assert_eq!(create_function(vec![], vec![Stmt::Expression { expr: Expr::Binary { op: '+', left: Box::new(Expr::Number(4f64)), right: Box::new(Expr::Number(5f64)) } }]), res[0])
+        assert_eq!(create_function(vec![], vec![Stmt::Expression { expr: Expr::Binary { op: Token::Plus, left: Box::new(Expr::Number(4f64)), right: Box::new(Expr::Number(5f64)) } }]), res[0])
     }
 
     #[test]
@@ -714,8 +719,8 @@ mod tests {
         let res = parse_no_error("fun test() { 4 + 5; 5 - 6; }");
         assert_eq!(
             create_function(vec![], vec![
-                Stmt::Expression { expr: Expr::Binary { op: '+', left: Box::new(Expr::Number(4f64)), right: Box::new(Expr::Number(5f64)) } },
-                Stmt::Expression { expr: Expr::Binary { op: '-', left: Box::new(Expr::Number(5f64)), right: Box::new(Expr::Number(6f64)) } }    
+                Stmt::Expression { expr: Expr::Binary { op: Token::Plus, left: Box::new(Expr::Number(4f64)), right: Box::new(Expr::Number(5f64)) } },
+                Stmt::Expression { expr: Expr::Binary { op: Token::Sub, left: Box::new(Expr::Number(5f64)), right: Box::new(Expr::Number(6f64)) } }    
             ]),
             res[0]
         )
@@ -727,18 +732,18 @@ mod tests {
         assert_eq!(
             create_function(vec![], vec![
                 Stmt::Expression { expr: Expr::Binary {
-                    op: '-',
+                    op: Token::Sub,
                     left: Box::new(Expr::Binary {
-                        op: '+',
+                        op: Token::Plus,
                         left: Box::new(Expr::Number(4f64)),
-                        right: Box::new(Expr::Binary { op: '*', left: Box::new(Expr::Number(5f64)), right: Box::new(Expr::Number(5f64)) }),
+                        right: Box::new(Expr::Binary { op: Token::Star, left: Box::new(Expr::Number(5f64)), right: Box::new(Expr::Number(5f64)) }),
                     }),
                     right: Box::new(Expr::Binary { 
-                        op: '/',
+                        op: Token::Divide,
                         left: Box::new(Expr::Number(6f64)),
                         right: Box::new(Expr::Binary {
-                            op: '*',
-                            left: Box::new(Expr::Binary { op: '+', left: Box::new(Expr::Number(5f64)), right: Box::new(Expr::Number(6f64)) }),
+                            op: Token::Star,
+                            left: Box::new(Expr::Binary { op: Token::Plus, left: Box::new(Expr::Number(5f64)), right: Box::new(Expr::Number(6f64)) }),
                             right: Box::new(Expr::Number(6f64)),        
                         })
                     })
@@ -769,7 +774,7 @@ mod tests {
         let res = parse_no_error("fun test() { var x = 4 + 5; }");
         assert_eq!(
             create_function(vec![], vec![
-                Stmt::Expression { expr: Expr::VarDeclar { variable: "x".to_string(), body: Box::new(Expr::Binary { op: '+', left: Box::new(Expr::Number(4f64)), right: Box::new(Expr::Number(5f64)) }) } }
+                Stmt::Expression { expr: Expr::VarDeclar { variable: "x".to_string(), body: Box::new(Expr::Binary { op: Token::Plus, left: Box::new(Expr::Number(4f64)), right: Box::new(Expr::Number(5f64)) }) } }
             ]),
             res[0]
         )
@@ -780,7 +785,7 @@ mod tests {
         let res = parse_no_error("fun test() { if (1 < 1) { } }");
         assert_eq!(
             create_function(vec![], vec![
-                Stmt::Conditional { cond: Expr::Binary { op: '<', left: Box::new(Expr::Number(1f64)), right: Box::new(Expr::Number(1f64)) }, then: vec![], otherwise: vec![] }
+                Stmt::Conditional { cond: Expr::Binary { op: Token::Less, left: Box::new(Expr::Number(1f64)), right: Box::new(Expr::Number(1f64)) }, then: vec![], otherwise: vec![] }
             ]),
             res[0]
         )
@@ -793,10 +798,11 @@ mod tests {
             create_function(vec![], vec![
                 Stmt::For { 
                     start: Expr::VarDeclar { variable: "x".to_string(), body: Box::new(Expr::Number(0f64)) },
-                    condition: Expr::Binary { op: '<', left: Box::new(Expr::Variable("x".to_string())), right: Box::new(Expr::Number(1f64)) },
+                    condition: Expr::Binary { op: Token::Less, left: Box::new(Expr::Variable("x".to_string())), right: Box::new(Expr::Number(1f64)) },
                     step: Expr::VarAssign {
+                        op: Token::Equal,
                         variable: "x".to_string(),
-                        body: Box::new(Expr::Binary { op: '+', left: Box::new(Expr::Variable("x".to_string())), right: Box::new(Expr::Number(1f64)) })
+                        body: Box::new(Expr::Binary { op: Token::Plus, left: Box::new(Expr::Variable("x".to_string())), right: Box::new(Expr::Number(1f64)) })
                     },
                     body: vec![]
                 }
@@ -810,7 +816,7 @@ mod tests {
         let res = parse_no_error("fun test() { x = 1; }");
         assert_eq!(
             create_function(vec![], vec![
-                Stmt::Expression { expr: Expr::VarAssign { variable: "x".to_string(), body: Box::new(Expr::Number(1f64)) } }
+                Stmt::Expression { expr: Expr::VarAssign { op: Token::Equal, variable: "x".to_string(), body: Box::new(Expr::Number(1f64)) } }
             ]),
             res[0]
         )
@@ -818,16 +824,18 @@ mod tests {
 
     #[test]
     fn multiple_assignment() {
-        let res = parse_no_error("fun test() { x = 1 + y = 2; }");
+        let res = parse_no_error("fun test() { x = 1 + (y = 2); }");
         assert_eq!(
             create_function(vec![], vec![
                 Stmt::Expression { 
                     expr: Expr::VarAssign {
+                        op: Token::Equal,
                         variable: "x".to_string(), 
                         body: Box::new(Expr::Binary {
-                            op: '+',
+                            op: Token::Plus,
                             left: Box::new(Expr::Number(1f64)),
                             right: Box::new(Expr::VarAssign {
+                                op: Token::Equal,
                                 variable: "y".to_string(),
                                 body: Box::new(Expr::Number(2f64))
                             })
@@ -866,7 +874,7 @@ mod tests {
     #[test]
     fn unary_expr() {
         let res = parse_no_error("fun test() { -5; }");
-        assert_eq!(create_function(vec![], vec![Stmt::Expression { expr: Expr::Unary { op: '-', right: Box::new(Expr::Number(5f64)) } }]), res[0])
+        assert_eq!(create_function(vec![], vec![Stmt::Expression { expr: Expr::Unary { op: Token::Sub, body: Box::new(Expr::Number(5f64)), pre: true } }]), res[0])
     }
 
     #[test]
@@ -1050,6 +1058,7 @@ mod tests {
         assert_eq!(vec!["Expected function identifier", "Expected '(' before argument list", "Expected argument identifier", "Expected ')' after argument list", "Expected '{' before body", "Expected '}' after body"], output)
     }
 
+    // TODO: Look at this test, it is wrong
     #[test]
     fn func_ident_invalid_token() {
         let output = parse_error("fun test(a b!) { }");
@@ -1066,20 +1075,20 @@ mod tests {
 
     #[test]
     fn invalid_expr_ident() {
-        let output = parse_error("fun test() { 4 + b! * 5 - 6 / ((5 + 6) * 6); }");
+        let output = parse_error("fun test() { 4 + b!; }");
         assert_eq!(vec!["Invalid identifier: b!"], output)
     }
 
     #[test]
     fn invalid_expr_mult() {
         let output = parse_error("fun test() { 5(6); }");
-        assert_eq!(vec!["Cannot multiply using '('"], output)
+        assert_eq!(vec!["Unexpected opening '('"], output)
     }
 
     #[test]
     fn invalid_expr_random_paren() {
         let output = parse_error("fun test() { 4 + 5((5 + 6); }");
-        assert_eq!(vec!["Cannot multiply using '('", "Expected closing ')'",], output)
+        assert_eq!(vec!["Unexpected opening '('"], output)
     }
 
     #[test]
@@ -1109,7 +1118,7 @@ mod tests {
     #[test]
     fn invalid_assignment_target() {
         let output = parse_error("fun test() { 1 = 2; }");
-        assert_eq!(vec!["Attempting to assign to non-variable"], output)
+        assert_eq!(vec!["Expected ident before assignment"], output)
     }
 
     #[test]
@@ -1122,5 +1131,41 @@ mod tests {
     fn return_dead_code() {
         let output = parse_error("fun test() { return 2; var x = 1; }");
         assert_eq!(vec!["Dead code after return statement"], output)
+    }
+
+    #[test]
+    fn valid_pre_decrement() {
+        let res = parse_no_error("fun test() { --x; }");
+        assert_eq!(create_function(vec![], vec![Stmt::Expression { expr: Expr::Unary { op: Token::SubSub, body: Box::from(Expr::Variable("x".to_string())), pre: true } }]), res[0]);
+    }
+
+    #[test]
+    fn invalid_pre_decrement_easy() {
+        let output = parse_error("fun test() { --3; }");
+        assert_eq!(vec!["Applied increment or decrement operator to non variable"], output)
+    }
+
+    #[test]
+    fn invalid_pre_decrement_hard() {
+        let output = parse_error("fun test() { --function(); }");
+        assert_eq!(vec!["Applied increment or decrement operator to non variable"], output)
+    }
+
+    #[test]
+    fn valid_post_decrement() {
+        let res = parse_no_error("fun test() { x--; }");
+        assert_eq!(create_function(vec![], vec![Stmt::Expression { expr: Expr::Unary { op: Token::SubSub, body: Box::from(Expr::Variable("x".to_string())), pre: false } }]), res[0]);
+    }
+
+    #[test]
+    fn invalid_post_decrement_easy() {
+        let output = parse_error("fun test() { 3--; }");
+        assert_eq!(vec!["Applied increment or decrement operator to non variable"], output)
+    }
+
+    #[test]
+    fn invalid_post_decrement_hard() {
+        let output = parse_error("fun test() { function()--; }");
+        assert_eq!(vec!["Applied increment or decrement operator to non variable"], output)
     }
 }

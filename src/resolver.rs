@@ -1,6 +1,6 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use inkwell::values::{FunctionValue, GlobalValue, PointerValue};
-use crate::parser::{Expr, Stmt};
+use crate::{lexer::Token, parser::{Expr, Stmt}};
 
 #[cfg(debug_assertions)]
 use crate::trace;
@@ -457,17 +457,22 @@ impl<'ctx> Resolver<'ctx> {
     fn resolve_global_body(&mut self, expr: &Expr) {
         trace_resolver!("Resolving global body: {}", expr);
         match expr {
-            Expr::VarAssign { variable: _, body: _ } => self.errors.push("Global body must be static".to_string()),
+            Expr::VarAssign { .. } => self.errors.push("Global body must be static".to_string()),
             Expr::Binary { op: _, left, right } => {
                 self.resolve_global_body(left);
                 self.resolve_global_body(right)
             },
-            Expr::Unary { op: _, right } => self.resolve_global_body(right),
-            Expr::Call { function_name: _, args: _ } => self.errors.push("Cannot initalise global with a function call".to_string()),
+            Expr::Unary { body, op, pre: _ } => { 
+                // Ensure we do not allow decrememnt and increment operators in a global body
+                if !matches!(op, Token::SubSub | Token::PlusPlus) { self.errors.push("Global body must be static".to_string()) }
+
+                self.resolve_global_body(body)
+            },
+            Expr::Call { .. } => self.errors.push("Cannot initalise global with a function call".to_string()),
             Expr::Number(_) => {},
             Expr::Variable(_) => self.errors.push("Global body must be static".to_string()),
             Expr::Null => panic!("FATAL: Attempting to resolve null expression, this indicates a programmer error in the parser has caused a catasrophic crash"),
-            Expr::VarDeclar { variable: _, body: _ } => panic!("FATAL: Attempting to resolve var declar in a global declaration, this indicates a programmer error in the parser has caused a catasrophic crash"),
+            Expr::VarDeclar { .. } => panic!("FATAL: Attempting to resolve var declar in a global declaration, this indicates a programmer error in the parser has caused a catasrophic crash"),
         }
     }
 
@@ -629,7 +634,7 @@ impl<'ctx> Resolver<'ctx> {
                 let variable_val = Rc::from(RefCell::from(Variable::new()));
                 scope.borrow_mut().set_variable(variable.to_string(), variable_val);
             },
-            Expr::VarAssign { variable, body } => {
+            Expr::VarAssign { op: _, variable, body } => {
                 self.resolve_variable(scope.clone(), variable);
                 self.resolve_expr(scope, body);
             },
@@ -637,7 +642,7 @@ impl<'ctx> Resolver<'ctx> {
                 self.resolve_expr(scope.clone(), left);
                 self.resolve_expr(scope, right);
             },
-            Expr::Unary { op: _, right } => self.resolve_expr(scope, right),
+            Expr::Unary { body: right, .. } => self.resolve_expr(scope, right),
             Expr::Call { function_name, args } => {
                 // Set the local to point to the global function
                 if !self.globals.contains_function_pointer(function_name) {
@@ -968,4 +973,10 @@ mod tests {
     }
 
     // TODO: When nested bodies are added, test them
+
+    #[test]
+    fn invalid_global_increment() {
+        let err = run_err("global var x = 1; global var y = ++x; fun main() { return 1; }");
+        assert_eq!(vec!["Global body must be static"], err)
+    }
 }
