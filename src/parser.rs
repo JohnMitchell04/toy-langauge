@@ -19,7 +19,7 @@ macro_rules! trace_parser {
 }
 
 macro_rules! match_no_error {
-    ($self:ident, $token:pat, $str:tt) => {
+    ($self:ident, $token:pat, $str:literal) => {
         match $self.peek() {
             Ok($token) => { _ = $self.next() },
             Ok(_) => {
@@ -358,22 +358,10 @@ impl<'a> Parser<'a> {
     fn parse_expr_stmt(&mut self) -> Stmt {
         trace_parser!("Parsing expression statement");
 
-        let expr = self.parse_expr();
+        let expr = self.parse_expr(false);
 
         // Ensure we move to a safe point after a statement
-        if let Ok(Token::Semicolon) = self.peek() {
-            _ = self.next();
-        } else {
-            // This is slightly hacky and ideally a better solution should be found, but if an expression had some unmatched parens,
-            // we can end in a situation where we don't move to a safe point to continue, which this deals with
-            let paren_err = if let Ok(Token::RParen) = self.peek() { true } else { false };
-
-            err_advance_safe!(self, "Expected ';' after expression statement".to_string(), Token::Semicolon, Token::RBrace);
-
-            if paren_err { self.errors.pop(); self.errors.push("Unexpected closing ')'".to_string()); }
-
-            if let Ok(Token::Semicolon) = self.peek() { _ = self.next() }
-        }
+        match_no_error!(self, Token::Semicolon, "Expected ';' after expression statement");
 
         Stmt::Expression { expr }
     }
@@ -388,7 +376,7 @@ impl<'a> Parser<'a> {
 
         match_no_error!(self, Token::LParen, "Expected '(' after 'if' keyword");
 
-        let cond = self.parse_expr();
+        let cond = self.parse_expr(true);
 
         match_no_error!(self, Token::RParen, "Expected ')' after condition");
         
@@ -431,11 +419,11 @@ impl<'a> Parser<'a> {
             _ => panic!("FATAL: This should never happend due to how var statement parsing works"),
         };
 
-        let condition = self.parse_expr();
+        let condition = self.parse_expr(false);
 
         match_no_error!(self, Token::Semicolon, "Expected ';' after condition");
 
-        let step = self.parse_expr();
+        let step = self.parse_expr(true);
 
         match_no_error!(self, Token::RParen, "Expected ')' after for definition");
         
@@ -461,7 +449,7 @@ impl<'a> Parser<'a> {
 
         match_no_error!(self, Token::Equal, "Expected '=' after identifier");
 
-        let body = Box::new(self.parse_expr());
+        let body = Box::new(self.parse_expr(false));
 
         match_no_error!(self, Token::Semicolon, "Expected ';' after assignment");
 
@@ -478,7 +466,7 @@ impl<'a> Parser<'a> {
         let body = if let Ok(Token::Semicolon) = self.peek() {
             Box::new(Expr::Null)
         } else {
-            Box::new(self.parse_expr())
+            Box::new(self.parse_expr(false))
         };
 
         match_no_error!(self, Token::Semicolon, "Expected ';' after return statement");
@@ -491,15 +479,14 @@ impl<'a> Parser<'a> {
         Stmt::Return { body }
     }
 
-    // TODO: Try and find a better system for handling brackets, including mismatched ones
     /// Parse any expression, dealing with operator precedences.
-    fn parse_expr(&mut self) -> Expr {
+    fn parse_expr(&mut self, nested: bool) -> Expr {
         trace_parser!("Parsing expression");
-        self.expr_binding(0)
+        self.expr_binding(0, nested)
     }
 
     /// Recursive expression binding parser.
-    fn expr_binding(&mut self, min_binding: u8) -> Expr {
+    fn expr_binding(&mut self, min_binding: u8, nested: bool) -> Expr {
         trace_parser!("Parsing expression binding power: {}", min_binding);
         let mut left = match self.peek() {
             // TODO: Overhaul when type literals are added
@@ -511,13 +498,13 @@ impl<'a> Parser<'a> {
             Ok(Token::Variable(_)) => self.parse_ident().expect("FATAL: Tried to parse non-ident as ident expression, this should never happen and indicates a programmer error"),
             Ok(Token::LParen) => {
                 _ = self.next();
-                let left = self.expr_binding(0);
+                let left = self.expr_binding(0, true);
                 match_no_error!(self, Token::RParen, "Expected closing ')'");
                 left
             },
-            Ok(token) if token.is_prefix_op() => self.parse_prefix(),
+            Ok(token) if token.is_prefix_op() => self.parse_prefix(nested),
             Ok(_) => {
-                self.errors.push(String::from("Expected operator, number or ident"));
+                err_advance_safe!(self, "Expected operator, number or ident".to_string(), Token::Semicolon, Token::RParen, Token::LBrace, Token::RBrace);
                 Expr::Null
             },
             Err(ref err) => {
@@ -536,7 +523,7 @@ impl<'a> Parser<'a> {
                     let variable = if let Expr::Variable(name) = left { name } else { err_advance_safe!(self, "Expected ident before assignment".to_string(), Token::Semicolon); break };
                     let token = self.next().unwrap();
 
-                    let right = Box::new(self.expr_binding(r_binding));
+                    let right = Box::new(self.expr_binding(r_binding, nested));
                     left = Expr::VarAssign { op: token, variable, body: right }
                 },
                 Ok(token) if token.is_infix_operator() => {
@@ -550,7 +537,7 @@ impl<'a> Parser<'a> {
                     if l_binding < min_binding { break }
                     let token = self.next().unwrap();
 
-                    let right = Box::new(self.expr_binding(r_binding));
+                    let right = Box::new(self.expr_binding(r_binding, nested));
                     left = Expr::Binary { op: token, left: Box::new(left), right }
                 },
                 Ok(token) if token.is_postfix_operator() => {
@@ -566,6 +553,10 @@ impl<'a> Parser<'a> {
                     err_advance_safe!(self, "Unexpected opening '('".to_string(), Token::Semicolon);
                     break
                 },
+                Ok(Token::RParen) if !nested => {
+                    err_advance_safe!(self, "Unexpected closing ')'".to_string(), Token::Semicolon);
+                    break
+                }
                 _ => break,
             }
         }
@@ -586,7 +577,7 @@ impl<'a> Parser<'a> {
                 while let Ok(node) = self.peek() {
                     if *node == Token::RParen { break }
 
-                    args.push(self.parse_expr());
+                    args.push(self.parse_expr(true));
 
                     match self.peek() {
                         Ok(Token::Comma) => { _ = self.next(); },
@@ -609,7 +600,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a prefix expression.
-    fn parse_prefix(&mut self) -> Expr {
+    fn parse_prefix(&mut self, nested: bool) -> Expr {
         trace_parser!("Parsing prefix expression");
         let op = self.next().unwrap();
 
@@ -622,41 +613,11 @@ impl<'a> Parser<'a> {
 
             Box::new(res.unwrap())
         } else {
-            Box::new(self.expr_binding(5))     
+            Box::new(self.expr_binding(5, nested))
         };
 
         Expr::Unary { op, body: right, pre: true }
-    }
-
-    // /// Get the binding power of some prefix operator.
-    // fn prefix_binding_power(&self, op: &Token) -> u8 {
-    //     trace_parser!("Calculating prefix binding power");
-    //     match op {
-    //         Token::Sub => 5,
-    //         Token::SubSub => 5,
-    //         Token::PlusPlus => 5,
-    //         Token::Exclam => 5,
-    //         _ => panic!("FATAL: Passed a non-unary operator as a prefix expression, this indicates a programmer error"),
-    //     }
-    // }
-
-    // /// Get the binding power of some infix operator.
-    // fn infix_binding_power(&self, op: &Token) -> (u8, u8) {
-    //     trace_parser!("Calculating infix binding power");
-        
-    // }
-
-    // TODO: Add star as postifx operator when pointers are added
-    // TODO: Implement arrays
-    // /// Get the binding power of some postfix operator.
-    // fn postfix_binding_power(&self, op: &Token) -> u8 {
-    //     trace_parser!("Calculating postfix binding power");
-    //     match op {
-    //         Token::SubSub => 5,
-    //         Token::PlusPlus => 5,
-    //         _ => panic!("FATAL: Passed a non-unary operator as a postfix expression, this indicates a programmer error"),
-    //     }
-    // }    
+    }   
 }
 
 #[cfg(test)]
@@ -1070,7 +1031,7 @@ mod tests {
     #[test]
     fn invalid_expr_keyword() {
         let output = parse_error("fun test() { 4 + fun * 5 - 6; }");
-        assert_eq!(vec!["Expected operator, number or ident", "Expected ';' after expression statement"], output)
+        assert_eq!(vec!["Expected operator, number or ident"], output)
     }
 
     #[test]
@@ -1112,6 +1073,12 @@ mod tests {
     #[test]
     fn invalid_expr_extra_paren_simple() {
         let output = parse_error("fun test() { (5 + 6)); }");
+        assert_eq!(vec!["Unexpected closing ')'"], output)
+    }
+
+    #[test]
+    fn invalid_expr_extra_paren_simpler() {
+        let output = parse_error("fun test() { 5 + 6); }");
         assert_eq!(vec!["Unexpected closing ')'"], output)
     }
 

@@ -49,7 +49,6 @@ impl Token {
         matches!(self, Self::Sub | Self::PlusPlus | Self::SubSub | Self::Exclam)
     }
 
-    // TODO: Add star as postifx operator when pointer are added
     pub fn is_postfix_operator(&self) -> bool {
         matches!(self, Self::SubSub | Self::PlusPlus | Self::Star)
     }
@@ -367,7 +366,6 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    // TODO: skip comments
     /// Skip whitespace characters and comments.
     fn skip_whitespace(&mut self) {
         trace_lexer!("Skipping whitespace");
